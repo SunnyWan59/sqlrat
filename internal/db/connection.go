@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -36,6 +37,46 @@ func Connect(host, port, user, password, database string) (*DB, error) {
 	return &DB{
 		Conn:       conn,
 		connString: connStr,
+		host:       host,
+		port:       port,
+		user:       user,
+		database:   database,
+	}, nil
+}
+
+// ConnectURI establishes a PostgreSQL connection from a raw URI string.
+func ConnectURI(uri string) (*DB, error) {
+	parsed, err := url.Parse(uri)
+	if err != nil {
+		return nil, fmt.Errorf("invalid URI: %w", err)
+	}
+
+	host := parsed.Hostname()
+	port := parsed.Port()
+	if port == "" {
+		port = "5432"
+	}
+	user := parsed.User.Username()
+	database := strings.TrimPrefix(parsed.Path, "/")
+
+	// Ensure sslmode is set if not already present
+	q := parsed.Query()
+	if q.Get("sslmode") == "" {
+		q.Set("sslmode", "prefer")
+		parsed.RawQuery = q.Encode()
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	conn, err := pgx.Connect(ctx, parsed.String())
+	if err != nil {
+		return nil, err
+	}
+
+	return &DB{
+		Conn:       conn,
+		connString: parsed.String(),
 		host:       host,
 		port:       port,
 		user:       user,

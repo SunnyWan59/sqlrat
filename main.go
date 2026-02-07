@@ -15,17 +15,27 @@ import (
 	"cli-sql/internal/ui"
 )
 
+// connMode represents whether the user is entering a URI or individual fields.
+type connMode int
+
+const (
+	modeURI connMode = iota
+	modeFields
+)
+
 // connectionModel handles the connection form on startup.
 type connectionModel struct {
-	inputs  []textinput.Model
-	cursor  int
-	err     string
+	inputs     []textinput.Model
+	uriInput   textinput.Model
+	mode       connMode
+	cursor     int
+	err        string
 	connecting bool
-	done    bool
-	db      *db.DB
-	tables  []string
-	width   int
-	height  int
+	done       bool
+	db         *db.DB
+	tables     []string
+	width      int
+	height     int
 }
 
 type connectResultMsg struct {
@@ -56,7 +66,6 @@ func newConnectionModel() connectionModel {
 		case fieldHost:
 			t.Placeholder = "localhost"
 			t.SetValue("localhost")
-			t.Focus()
 		case fieldPort:
 			t.Placeholder = "5432"
 			t.SetValue("5432")
@@ -72,9 +81,17 @@ func newConnectionModel() connectionModel {
 		inputs[i] = t
 	}
 
+	uriInput := textinput.New()
+	uriInput.Placeholder = "postgres://user:password@host:5432/dbname"
+	uriInput.CharLimit = 512
+	uriInput.Width = 60
+	uriInput.Focus()
+
 	return connectionModel{
-		inputs: inputs,
-		cursor: 0,
+		inputs:   inputs,
+		uriInput: uriInput,
+		mode:     modeURI,
+		cursor:   0,
 	}
 }
 
@@ -93,20 +110,44 @@ func (m connectionModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
+		case "ctrl+u":
+			// Toggle between URI and fields mode
+			if m.connecting {
+				return m, nil
+			}
+			m.err = ""
+			if m.mode == modeURI {
+				m.mode = modeFields
+				m.uriInput.Blur()
+				m.cursor = 0
+				m.inputs[0].Focus()
+			} else {
+				m.mode = modeURI
+				for i := range m.inputs {
+					m.inputs[i].Blur()
+				}
+				m.uriInput.Focus()
+			}
+			return m, textinput.Blink
 		case "enter":
 			if m.connecting {
 				return m, nil
 			}
+			if m.mode == modeURI {
+				return m, m.tryConnectURI()
+			}
+			// Fields mode
 			if m.cursor < len(m.inputs)-1 {
-				// Move to next input
 				m.inputs[m.cursor].Blur()
 				m.cursor++
 				m.inputs[m.cursor].Focus()
 				return m, textinput.Blink
 			}
-			// On the last field, attempt connection
 			return m, m.tryConnect()
 		case "shift+tab":
+			if m.mode == modeURI {
+				return m, nil
+			}
 			if m.cursor > 0 {
 				m.inputs[m.cursor].Blur()
 				m.cursor--
@@ -114,6 +155,9 @@ func (m connectionModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, textinput.Blink
 			}
 		case "tab", "down":
+			if m.mode == modeURI {
+				return m, nil
+			}
 			if m.cursor < len(m.inputs)-1 {
 				m.inputs[m.cursor].Blur()
 				m.cursor++
@@ -121,6 +165,9 @@ func (m connectionModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, textinput.Blink
 			}
 		case "up":
+			if m.mode == modeURI {
+				return m, nil
+			}
 			if m.cursor > 0 {
 				m.inputs[m.cursor].Blur()
 				m.cursor--
@@ -141,8 +188,13 @@ func (m connectionModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	}
 
+	// Update the active input
 	var cmd tea.Cmd
-	m.inputs[m.cursor], cmd = m.inputs[m.cursor].Update(msg)
+	if m.mode == modeURI {
+		m.uriInput, cmd = m.uriInput.Update(msg)
+	} else {
+		m.inputs[m.cursor], cmd = m.inputs[m.cursor].Update(msg)
+	}
 	return m, cmd
 }
 
@@ -157,16 +209,38 @@ func (m connectionModel) View() string {
 	b.WriteString(titleStyle.Render("CLI-SQL - PostgreSQL Client"))
 	b.WriteString("\n\n")
 
-	for i, input := range m.inputs {
-		label := fieldLabels[i]
-		if i == m.cursor {
-			b.WriteString(ui.AccentText.Render(fmt.Sprintf("  %s", label)))
-		} else {
-			b.WriteString(fmt.Sprintf("  %s", label))
-		}
+	// Mode tabs
+	uriTab := "  Connection URI  "
+	fieldsTab := "  Individual Fields  "
+	if m.mode == modeURI {
+		uriTab = ui.AccentText.Bold(true).Render("  Connection URI  ")
+		fieldsTab = ui.DimText.Render("  Individual Fields  ")
+	} else {
+		uriTab = ui.DimText.Render("  Connection URI  ")
+		fieldsTab = ui.AccentText.Bold(true).Render("  Individual Fields  ")
+	}
+	b.WriteString("  " + uriTab + " | " + fieldsTab)
+	b.WriteString("\n")
+	b.WriteString(ui.DimText.Render("  Ctrl+U to switch mode"))
+	b.WriteString("\n\n")
+
+	if m.mode == modeURI {
+		b.WriteString(ui.AccentText.Render("  Connection URI"))
 		b.WriteString("\n")
-		b.WriteString("  " + input.View())
+		b.WriteString("  " + m.uriInput.View())
 		b.WriteString("\n\n")
+	} else {
+		for i, input := range m.inputs {
+			label := fieldLabels[i]
+			if i == m.cursor {
+				b.WriteString(ui.AccentText.Render(fmt.Sprintf("  %s", label)))
+			} else {
+				b.WriteString(fmt.Sprintf("  %s", label))
+			}
+			b.WriteString("\n")
+			b.WriteString("  " + input.View())
+			b.WriteString("\n\n")
+		}
 	}
 
 	if m.err != "" {
@@ -176,12 +250,38 @@ func (m connectionModel) View() string {
 
 	if m.connecting {
 		b.WriteString(ui.DimText.Render("  Connecting..."))
+	} else if m.mode == modeURI {
+		b.WriteString(ui.DimText.Render("  Press Enter to connect | Ctrl+U for individual fields | Ctrl+C to quit"))
 	} else {
-		b.WriteString(ui.DimText.Render("  Press Enter to connect | Tab to move between fields | Ctrl+C to quit"))
+		b.WriteString(ui.DimText.Render("  Press Enter to connect | Tab between fields | Ctrl+U for URI mode | Ctrl+C to quit"))
 	}
 	b.WriteString("\n")
 
 	return b.String()
+}
+
+func (m connectionModel) tryConnectURI() tea.Cmd {
+	uri := strings.TrimSpace(m.uriInput.Value())
+	if uri == "" {
+		return func() tea.Msg {
+			return connectResultMsg{err: fmt.Errorf("URI cannot be empty")}
+		}
+	}
+
+	return func() tea.Msg {
+		conn, err := db.ConnectURI(uri)
+		if err != nil {
+			return connectResultMsg{err: err}
+		}
+
+		tables, err := conn.ListTables()
+		if err != nil {
+			conn.Close()
+			return connectResultMsg{err: fmt.Errorf("failed to list tables: %w", err)}
+		}
+
+		return connectResultMsg{db: conn, tables: tables}
+	}
 }
 
 func (m connectionModel) tryConnect() tea.Cmd {
