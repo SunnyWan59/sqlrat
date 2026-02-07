@@ -35,6 +35,7 @@ var (
 	DeletedText  = lipgloss.NewStyle().Foreground(ColorDeleteRow).Faint(true)
 	NewRowText   = lipgloss.NewStyle().Foreground(ColorNewRow)
 	NullText     = lipgloss.NewStyle().Foreground(ColorDim).Italic(true)
+	BannerText   = lipgloss.NewStyle().Foreground(ColorSuccess).Bold(true)
 )
 
 // Header styles

@@ -30,6 +30,7 @@ type ResultsModel struct {
 	colWidths    []int
 	errMsg       string
 	infoMsg      string
+	bannerMsg    string
 	insertedRows int // count of locally inserted rows (at end of rows slice)
 }
 
@@ -69,6 +70,7 @@ func (m *ResultsModel) SetData(columns []string, columnTypes []string, rows [][]
 	m.editValue = ""
 	m.errMsg = ""
 	m.infoMsg = ""
+	m.bannerMsg = ""
 	m.insertedRows = 0
 	m.calcColWidths()
 }
@@ -91,6 +93,11 @@ func (m *ResultsModel) SetError(msg string) {
 func (m *ResultsModel) SetInfo(msg string) {
 	m.infoMsg = msg
 	m.errMsg = ""
+}
+
+// SetBanner sets a highlighted banner message above the table.
+func (m *ResultsModel) SetBanner(msg string) {
+	m.bannerMsg = msg
 }
 
 // IsEditing returns whether we're in edit mode.
@@ -413,6 +420,12 @@ func (m ResultsModel) renderTable(w, h int) string {
 	}
 
 	var b strings.Builder
+
+	if m.bannerMsg != "" {
+		b.WriteString(BannerText.Render(m.bannerMsg))
+		b.WriteString("\n")
+		h--
+	}
 
 	// Determine visible columns
 	visibleCols := m.visibleColumns(w)

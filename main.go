@@ -11,9 +11,180 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"cli-sql/internal/app"
+	"cli-sql/internal/config"
 	"cli-sql/internal/db"
 	"cli-sql/internal/ui"
 )
+
+// ---------------------------------------------------------------------------
+// pickerModel – choose from saved connections
+// ---------------------------------------------------------------------------
+
+type pickerModel struct {
+	cfg        *config.Config
+	cursor     int
+	err        string
+	connecting bool
+	done       bool
+	newConn    bool
+	db         *db.DB
+	tables     []string
+	width      int
+	height     int
+}
+
+func newPickerModel(cfg *config.Config) pickerModel {
+	return pickerModel{cfg: cfg}
+}
+
+func (m pickerModel) Init() tea.Cmd { return nil }
+
+func (m pickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		return m, nil
+
+	case tea.KeyMsg:
+		if m.connecting {
+			if msg.String() == "ctrl+c" {
+				return m, tea.Quit
+			}
+			return m, nil
+		}
+
+		switch msg.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "up", "k":
+			if m.cursor > 0 {
+				m.cursor--
+			}
+			return m, nil
+		case "down", "j":
+			if m.cursor < len(m.cfg.Connections)-1 {
+				m.cursor++
+			}
+			return m, nil
+		case "n":
+			m.done = true
+			m.newConn = true
+			return m, tea.Quit
+		case "d", "x":
+			if len(m.cfg.Connections) > 0 {
+				m.cfg.Delete(m.cursor)
+				m.cfg.Save()
+				if m.cursor >= len(m.cfg.Connections) && m.cursor > 0 {
+					m.cursor--
+				}
+				if len(m.cfg.Connections) == 0 {
+					m.done = true
+					m.newConn = true
+					return m, tea.Quit
+				}
+			}
+			return m, nil
+		case "enter":
+			if len(m.cfg.Connections) == 0 {
+				return m, nil
+			}
+			m.connecting = true
+			m.err = ""
+			return m, m.connectSaved()
+		}
+
+	case connectResultMsg:
+		m.connecting = false
+		if msg.err != nil {
+			m.err = msg.err.Error()
+			return m, nil
+		}
+		m.done = true
+		m.db = msg.db
+		m.tables = msg.tables
+		return m, tea.Quit
+	}
+
+	return m, nil
+}
+
+func (m pickerModel) View() string {
+	titleStyle := lipgloss.NewStyle().
+		Foreground(ui.ColorAccent).
+		Bold(true).
+		MarginBottom(1)
+
+	var b strings.Builder
+
+	b.WriteString(titleStyle.Render("CLI-SQL - Saved Connections"))
+	b.WriteString("\n\n")
+
+	for i, conn := range m.cfg.Connections {
+		display := conn.Name
+		if conn.URI != "" {
+			display += ui.DimText.Render("  " + conn.URI)
+		} else {
+			display += ui.DimText.Render(fmt.Sprintf("  %s@%s:%s/%s", conn.User, conn.Host, conn.Port, conn.Database))
+		}
+
+		if i == m.cursor {
+			b.WriteString(ui.AccentText.Bold(true).Render("  ▸ " + display))
+		} else {
+			b.WriteString("    " + display)
+		}
+		b.WriteString("\n")
+	}
+
+	b.WriteString("\n")
+
+	if m.err != "" {
+		b.WriteString(ui.ErrorText.Render(fmt.Sprintf("  Connection failed: %s", m.err)))
+		b.WriteString("\n\n")
+	}
+
+	if m.connecting {
+		b.WriteString(ui.DimText.Render("  Connecting..."))
+	} else {
+		b.WriteString(ui.DimText.Render("  Enter to connect | n new connection | d delete | Ctrl+C quit"))
+	}
+	b.WriteString("\n")
+
+	return b.String()
+}
+
+func (m pickerModel) connectSaved() tea.Cmd {
+	conn := m.cfg.Connections[m.cursor]
+	return func() tea.Msg {
+		if conn.URI != "" {
+			d, err := db.ConnectURI(conn.URI)
+			if err != nil {
+				return connectResultMsg{err: err}
+			}
+			tables, err := d.ListTables()
+			if err != nil {
+				d.Close()
+				return connectResultMsg{err: fmt.Errorf("failed to list tables: %w", err)}
+			}
+			return connectResultMsg{db: d, tables: tables}
+		}
+
+		d, err := db.Connect(conn.Host, conn.Port, conn.User, conn.Password, conn.Database)
+		if err != nil {
+			return connectResultMsg{err: err}
+		}
+		tables, err := d.ListTables()
+		if err != nil {
+			d.Close()
+			return connectResultMsg{err: fmt.Errorf("failed to list tables: %w", err)}
+		}
+		return connectResultMsg{db: d, tables: tables}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// connectionModel – new connection form (URI or individual fields)
+// ---------------------------------------------------------------------------
 
 // connMode represents whether the user is entering a URI or individual fields.
 type connMode int
@@ -23,17 +194,29 @@ const (
 	modeFields
 )
 
+// connPhase tracks whether we're filling in fields or naming the connection.
+type connPhase int
+
+const (
+	phaseConnect connPhase = iota
+	phaseName
+)
+
 // connectionModel handles the connection form on startup.
 type connectionModel struct {
 	inputs     []textinput.Model
 	uriInput   textinput.Model
+	nameInput  textinput.Model
 	mode       connMode
+	phase      connPhase
 	cursor     int
 	err        string
 	connecting bool
 	done       bool
 	db         *db.DB
 	tables     []string
+	savedConn  config.SavedConnection
+	cfg        *config.Config
 	width      int
 	height     int
 }
@@ -54,7 +237,7 @@ const (
 
 var fieldLabels = []string{"Host", "Port", "Username", "Password", "Database"}
 
-func newConnectionModel() connectionModel {
+func newConnectionModel(cfg *config.Config) connectionModel {
 	inputs := make([]textinput.Model, 5)
 
 	for i := range inputs {
@@ -87,11 +270,19 @@ func newConnectionModel() connectionModel {
 	uriInput.Width = 60
 	uriInput.Focus()
 
+	nameInput := textinput.New()
+	nameInput.Placeholder = "my-connection"
+	nameInput.CharLimit = 128
+	nameInput.Width = 40
+
 	return connectionModel{
-		inputs:   inputs,
-		uriInput: uriInput,
-		mode:     modeURI,
-		cursor:   0,
+		inputs:    inputs,
+		uriInput:  uriInput,
+		nameInput: nameInput,
+		mode:      modeURI,
+		phase:     phaseConnect,
+		cursor:    0,
+		cfg:       cfg,
 	}
 }
 
@@ -107,6 +298,10 @@ func (m connectionModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		if m.phase == phaseName {
+			return m.updateNamePhase(msg)
+		}
+
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
@@ -182,10 +377,18 @@ func (m connectionModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.err = msg.err.Error()
 			return m, nil
 		}
-		m.done = true
 		m.db = msg.db
 		m.tables = msg.tables
-		return m, tea.Quit
+		m.phase = phaseName
+		if m.mode == modeURI {
+			m.uriInput.Blur()
+		} else {
+			for i := range m.inputs {
+				m.inputs[i].Blur()
+			}
+		}
+		m.nameInput.Focus()
+		return m, textinput.Blink
 	}
 
 	// Update the active input
@@ -195,6 +398,40 @@ func (m connectionModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	} else {
 		m.inputs[m.cursor], cmd = m.inputs[m.cursor].Update(msg)
 	}
+	return m, cmd
+}
+
+func (m connectionModel) updateNamePhase(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "enter":
+		name := strings.TrimSpace(m.nameInput.Value())
+		if name == "" {
+			m.err = "Connection name cannot be empty"
+			return m, nil
+		}
+		m.savedConn.Name = name
+		if m.mode == modeURI {
+			m.savedConn.URI = strings.TrimSpace(m.uriInput.Value())
+		} else {
+			m.savedConn.Host = m.inputs[fieldHost].Value()
+			m.savedConn.Port = m.inputs[fieldPort].Value()
+			m.savedConn.User = m.inputs[fieldUser].Value()
+			m.savedConn.Password = m.inputs[fieldPassword].Value()
+			m.savedConn.Database = m.inputs[fieldDatabase].Value()
+		}
+		m.cfg.Add(m.savedConn)
+		m.cfg.Save()
+		m.done = true
+		return m, tea.Quit
+	case "esc":
+		m.done = true
+		return m, tea.Quit
+	}
+
+	var cmd tea.Cmd
+	m.nameInput, cmd = m.nameInput.Update(msg)
 	return m, cmd
 }
 
@@ -208,6 +445,24 @@ func (m connectionModel) View() string {
 
 	b.WriteString(titleStyle.Render("CLI-SQL - PostgreSQL Client"))
 	b.WriteString("\n\n")
+
+	if m.phase == phaseName {
+		b.WriteString(ui.AccentText.Render("  Connected successfully!"))
+		b.WriteString("\n\n")
+		b.WriteString(ui.AccentText.Render("  Save as"))
+		b.WriteString("\n")
+		b.WriteString("  " + m.nameInput.View())
+		b.WriteString("\n\n")
+
+		if m.err != "" {
+			b.WriteString(ui.ErrorText.Render(fmt.Sprintf("  %s", m.err)))
+			b.WriteString("\n\n")
+		}
+
+		b.WriteString(ui.DimText.Render("  Enter to save | Esc to skip"))
+		b.WriteString("\n")
+		return b.String()
+	}
 
 	// Mode tabs
 	uriTab := "  Connection URI  "
@@ -323,26 +578,66 @@ func (m connectionModel) tryConnect() tea.Cmd {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// main
+// ---------------------------------------------------------------------------
+
 func main() {
-	// Phase 1: Connection form
-	connModel := newConnectionModel()
-	p := tea.NewProgram(connModel, tea.WithAltScreen())
-	result, err := p.Run()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+	cfg, _ := config.Load()
+
+	var database *db.DB
+	var tables []string
+
+	if len(cfg.Connections) > 0 {
+		picker := newPickerModel(cfg)
+		p := tea.NewProgram(picker, tea.WithAltScreen())
+		result, err := p.Run()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
+		pm, ok := result.(pickerModel)
+		if !ok {
+			return
+		}
+
+		if !pm.done {
+			return
+		}
+
+		if !pm.newConn {
+			database = pm.db
+			tables = pm.tables
+		}
 	}
 
-	cm, ok := result.(connectionModel)
-	if !ok || !cm.done {
-		// User quit during connection
+	if database == nil {
+		connModel := newConnectionModel(cfg)
+		p := tea.NewProgram(connModel, tea.WithAltScreen())
+		result, err := p.Run()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
+		cm, ok := result.(connectionModel)
+		if !ok || !cm.done {
+			return
+		}
+
+		database = cm.db
+		tables = cm.tables
+	}
+
+	if database == nil {
 		return
 	}
 
-	defer cm.db.Close()
+	defer database.Close()
 
 	// Phase 2: Main TUI
-	appModel := app.NewModel(cm.db, cm.tables)
+	appModel := app.NewModel(database, tables)
 	appProgram := tea.NewProgram(appModel, tea.WithAltScreen())
 	if _, err := appProgram.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)

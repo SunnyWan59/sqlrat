@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -70,8 +71,9 @@ type Model struct {
 	changes    *editor.ChangeTracker
 	width      int
 	height     int
-	lastSQL    string
-	lastTable  string
+	lastSQL       string
+	lastTable     string
+	pendingDMLMsg string
 }
 
 // NewModel creates the root app model.
@@ -155,7 +157,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.results.SetData(msg.result.Columns, msg.result.ColumnTypes, msg.result.Rows)
 			m.results.SetTableContext(msg.tableName, msg.pks)
-			if len(msg.pks) == 0 {
+			if m.pendingDMLMsg != "" {
+				m.results.SetBanner(m.pendingDMLMsg)
+				m.statusbar.SetMessage(m.pendingDMLMsg, ui.MsgSuccess)
+				m.pendingDMLMsg = ""
+			} else if len(msg.pks) == 0 {
 				m.statusbar.SetMessage("Read-only: table has no primary key", ui.MsgInfo)
 			} else {
 				m.statusbar.SetMessage(fmt.Sprintf("Loaded %d rows from %s", msg.result.RowCount, msg.tableName), ui.MsgSuccess)
@@ -178,9 +184,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusbar.SetQueryInfo(msg.result.ExecTime, msg.result.RowCount)
 			m.statusbar.SetMessage(fmt.Sprintf("Query returned %d rows", msg.result.RowCount), ui.MsgSuccess)
 		} else if msg.execRes != nil {
-			m.results.SetInfo(fmt.Sprintf("%d rows affected", msg.execRes.RowsAffected))
 			m.statusbar.SetQueryInfo(msg.execRes.ExecTime, int(msg.execRes.RowsAffected))
 			m.statusbar.SetMessage(fmt.Sprintf("%d rows affected", msg.execRes.RowsAffected), ui.MsgSuccess)
+			table := m.lastTable
+			if table == "" {
+				table = extractTableName(msg.lastSQL)
+			}
+			if table != "" {
+				m.pendingDMLMsg = fmt.Sprintf("✓ %d rows affected", msg.execRes.RowsAffected)
+				m.lastTable = table
+				return m, m.loadTable(table)
+			}
+			m.results.SetInfo(fmt.Sprintf("%d rows affected", msg.execRes.RowsAffected))
 		}
 		return m, nil
 
@@ -414,4 +429,23 @@ func (m *Model) commitChanges() tea.Cmd {
 
 		return commitResultMsg{count: len(queries)}
 	}
+}
+
+func extractTableName(sql string) string {
+	tokens := strings.Fields(strings.TrimSpace(sql))
+	upper := make([]string, len(tokens))
+	for i, t := range tokens {
+		upper[i] = strings.ToUpper(t)
+	}
+	for i, tok := range upper {
+		if (tok == "INTO" || tok == "FROM" || tok == "UPDATE") && i+1 < len(tokens) {
+			name := tokens[i+1]
+			name = strings.Trim(name, `"'`)
+			name = strings.TrimRight(name, "(;,")
+			if name != "" {
+				return name
+			}
+		}
+	}
+	return ""
 }
