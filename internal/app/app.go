@@ -53,6 +53,12 @@ type commitResultMsg struct {
 	count int
 }
 
+// reconnectResultMsg carries the result of a reconnect attempt.
+type reconnectResultMsg struct {
+	tables []string
+	err    error
+}
+
 // Model is the root Bubble Tea model.
 type Model struct {
 	activePane Pane
@@ -133,6 +139,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.commitChanges()
 			}
 			return m, nil
+		case "ctrl+r":
+			m.statusbar.SetMessage("Reconnecting...", ui.MsgInfo)
+			return m, m.reconnect()
 		}
 
 	case ui.TableSelectedMsg:
@@ -182,6 +191,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusbar.SetMessage(fmt.Sprintf("Committed %d changes", msg.count), ui.MsgSuccess)
 			m.changes.Clear()
 			// Refresh the current table if we were browsing one
+			if m.lastTable != "" {
+				return m, m.loadTable(m.lastTable)
+			}
+		}
+		return m, nil
+
+	case reconnectResultMsg:
+		if msg.err != nil {
+			m.statusbar.SetMessage("Reconnect failed: "+msg.err.Error(), ui.MsgError)
+		} else {
+			m.sidebar.SetTables(msg.tables)
+			m.changes.Clear()
+			m.statusbar.SetMessage(fmt.Sprintf("Reconnected (%d tables)", len(msg.tables)), ui.MsgSuccess)
+			// Reload active table if one was selected
 			if m.lastTable != "" {
 				return m, m.loadTable(m.lastTable)
 			}
@@ -336,6 +359,19 @@ func (m *Model) loadTable(tableName string) tea.Cmd {
 			tableName: tableName,
 			pks:       pks,
 		}
+	}
+}
+
+func (m *Model) reconnect() tea.Cmd {
+	return func() tea.Msg {
+		if err := m.db.Reconnect(); err != nil {
+			return reconnectResultMsg{err: fmt.Errorf("reconnect: %w", err)}
+		}
+		tables, err := m.db.ListTables()
+		if err != nil {
+			return reconnectResultMsg{err: fmt.Errorf("list tables: %w", err)}
+		}
+		return reconnectResultMsg{tables: tables}
 	}
 }
 

@@ -84,6 +84,26 @@ func ConnectURI(uri string) (*DB, error) {
 	}, nil
 }
 
+// Reconnect closes the existing connection and re-establishes it using the
+// original connection string. Returns the refreshed table list on success.
+func (d *DB) Reconnect() error {
+	if d.Conn != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		d.Conn.Close(ctx)
+		cancel()
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	conn, err := pgx.Connect(ctx, d.connString)
+	if err != nil {
+		return err
+	}
+	d.Conn = conn
+	return nil
+}
+
 // Close closes the database connection.
 func (d *DB) Close() {
 	if d.Conn != nil {
