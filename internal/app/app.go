@@ -146,6 +146,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.reconnect()
 		}
 
+	case ui.EditBlockedMsg:
+		m.statusbar.SetMessage(msg.Reason, ui.MsgError)
+		return m, nil
+
 	case ui.TableSelectedMsg:
 		m.lastTable = msg.Name
 		return m, m.loadTable(msg.Name)

@@ -10,6 +10,11 @@ import (
 	"cli-sql/internal/editor"
 )
 
+// EditBlockedMsg is sent when editing is not possible.
+type EditBlockedMsg struct {
+	Reason string
+}
+
 // ResultsModel is the interactive results table with CRUD support.
 type ResultsModel struct {
 	columns      []string
@@ -182,7 +187,14 @@ func (m ResultsModel) updateNavMode(msg tea.KeyMsg) (ResultsModel, tea.Cmd) {
 		}
 	case "e":
 		if len(m.primaryKeys) == 0 && !m.isInsertedRow(m.cursorRow) {
-			return m, nil
+			if m.tableName == "" {
+				return m, func() tea.Msg {
+					return EditBlockedMsg{Reason: "Cannot edit free-form query results"}
+				}
+			}
+			return m, func() tea.Msg {
+				return EditBlockedMsg{Reason: "Cannot edit: table has no primary key"}
+			}
 		}
 		if len(m.rows) > 0 {
 			m.editing = true
@@ -255,24 +267,46 @@ func (m ResultsModel) updateNavMode(msg tea.KeyMsg) (ResultsModel, tea.Cmd) {
 	return m, nil
 }
 
+func (m ResultsModel) commitCurrentCell() ResultsModel {
+	if m.isInsertedRow(m.cursorRow) {
+		m.rows[m.cursorRow][m.cursorCol] = m.editValue
+	} else {
+		pkVals := m.pkValues(m.cursorRow)
+		m.changes.StageEdit(editor.CellEdit{
+			TableName:   m.tableName,
+			RowPKValues: pkVals,
+			ColumnName:  m.columns[m.cursorCol],
+			OldValue:    m.rows[m.cursorRow][m.cursorCol],
+			NewValue:    m.editValue,
+		})
+	}
+	return m
+}
+
+func (m ResultsModel) moveToEditCell(col int) ResultsModel {
+	m.cursorCol = col
+	m.ensureColVisible()
+	val := m.displayValue(m.cursorRow, m.cursorCol)
+	if val == "<NULL>" {
+		val = ""
+	}
+	m.editValue = val
+	return m
+}
+
 func (m ResultsModel) updateEditMode(msg tea.KeyMsg) (ResultsModel, tea.Cmd) {
 	switch msg.String() {
-	case "enter":
-		// Confirm edit
-		m.editing = false
-		if m.isInsertedRow(m.cursorRow) {
-			// Update the local row data directly for inserts
-			m.rows[m.cursorRow][m.cursorCol] = m.editValue
+	case "enter", "tab":
+		m = m.commitCurrentCell()
+		if m.cursorCol < len(m.columns)-1 {
+			m = m.moveToEditCell(m.cursorCol + 1)
 		} else {
-			// Stage an edit for existing rows
-			pkVals := m.pkValues(m.cursorRow)
-			m.changes.StageEdit(editor.CellEdit{
-				TableName:   m.tableName,
-				RowPKValues: pkVals,
-				ColumnName:  m.columns[m.cursorCol],
-				OldValue:    m.rows[m.cursorRow][m.cursorCol],
-				NewValue:    m.editValue,
-			})
+			m.editing = false
+		}
+	case "shift+tab":
+		m = m.commitCurrentCell()
+		if m.cursorCol > 0 {
+			m = m.moveToEditCell(m.cursorCol - 1)
 		}
 	case "esc":
 		m.editing = false
@@ -282,7 +316,6 @@ func (m ResultsModel) updateEditMode(msg tea.KeyMsg) (ResultsModel, tea.Cmd) {
 			m.editValue = m.editValue[:len(m.editValue)-1]
 		}
 	default:
-		// Only add printable characters
 		if len(msg.String()) == 1 || msg.Type == tea.KeySpace {
 			m.editValue += msg.String()
 		} else if msg.Type == tea.KeyRunes {

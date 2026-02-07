@@ -53,8 +53,9 @@ var (
 	CellNormal   = lipgloss.NewStyle()
 	CellSelected = lipgloss.NewStyle().Reverse(true)
 	CellEditing  = lipgloss.NewStyle().
-			Border(lipgloss.NormalBorder()).
-			BorderForeground(ColorAccent)
+			Background(lipgloss.Color("#1a3a2a")).
+			Foreground(ColorAccent).
+			Bold(true)
 )
 
 // Status bar

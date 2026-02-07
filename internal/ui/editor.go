@@ -24,7 +24,7 @@ type EditorModel struct {
 // NewEditorModel creates a new SQL editor.
 func NewEditorModel() EditorModel {
 	ta := textarea.New()
-	ta.Placeholder = "Write SQL here... (Ctrl+E to execute)"
+	ta.Placeholder = "Write SQL here... (Ctrl+J run statement, Ctrl+E run all)"
 	ta.ShowLineNumbers = true
 	ta.CharLimit = 0
 	ta.Prompt = "  "
@@ -81,6 +81,14 @@ func (m EditorModel) Update(msg tea.Msg) (EditorModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
+		case "ctrl+j":
+			sql := m.statementAtCursor()
+			if sql == "" {
+				return m, nil
+			}
+			return m, func() tea.Msg {
+				return ExecuteQueryMsg{SQL: sql}
+			}
 		case "ctrl+e":
 			sql := strings.TrimSpace(m.textarea.Value())
 			if sql == "" {
@@ -102,6 +110,43 @@ func (m EditorModel) Value() string {
 	return m.textarea.Value()
 }
 
+func (m EditorModel) statementAtCursor() string {
+	text := m.textarea.Value()
+	if strings.TrimSpace(text) == "" {
+		return ""
+	}
+
+	cursorLine := m.textarea.Line()
+	lines := strings.Split(text, "\n")
+
+	offset := 0
+	for i := 0; i < cursorLine && i < len(lines); i++ {
+		offset += len(lines[i]) + 1
+	}
+
+	segments := strings.Split(text, ";")
+	pos := 0
+	for _, seg := range segments {
+		segEnd := pos + len(seg)
+		if offset <= segEnd {
+			trimmed := strings.TrimSpace(seg)
+			if trimmed != "" {
+				return trimmed
+			}
+		}
+		pos = segEnd + 1
+	}
+
+	for i := len(segments) - 1; i >= 0; i-- {
+		trimmed := strings.TrimSpace(segments[i])
+		if trimmed != "" {
+			return trimmed
+		}
+	}
+
+	return ""
+}
+
 // View renders the editor pane.
 func (m EditorModel) View() string {
 	borderStyle := UnfocusedBorder
@@ -120,7 +165,7 @@ func (m EditorModel) View() string {
 
 	// Header bar
 	titleLeft := HeaderStyle.Render("SQL Editor")
-	titleRight := DimText.Render("Ctrl+E to execute")
+	titleRight := DimText.Render("Ctrl+J line | Ctrl+E all")
 	gap := innerW - lipgloss.Width(titleLeft) - lipgloss.Width(titleRight)
 	if gap < 1 {
 		gap = 1

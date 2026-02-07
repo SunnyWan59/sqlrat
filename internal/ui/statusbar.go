@@ -120,7 +120,7 @@ func (m StatusBarModel) View() string {
 
 func (m StatusBarModel) contextHints() string {
 	if m.editMode {
-		return "Type to edit | Enter Confirm | Esc Cancel"
+		return "Type to edit | Tab/Enter Next col | Shift+Tab Prev col | Esc Cancel"
 	}
 
 	switch m.activePane {
