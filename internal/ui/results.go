@@ -17,26 +17,30 @@ type EditBlockedMsg struct {
 
 // ResultsModel is the interactive results table with CRUD support.
 type ResultsModel struct {
-	columns      []string
-	columnTypes  []string
-	rows         [][]string
-	cursorRow    int
-	cursorCol    int
-	focused      bool
-	editing      bool
-	editValue    string
-	changes      *editor.ChangeTracker
-	tableName    string
-	primaryKeys  []string
-	scrollOffset int
-	colOffset    int
-	width        int
-	height       int
-	colWidths    []int
-	errMsg       string
-	infoMsg      string
-	bannerMsg    string
-	insertedRows int // count of locally inserted rows (at end of rows slice)
+	columns         []string
+	columnTypes     []string
+	rows            [][]string
+	cursorRow       int
+	cursorCol       int
+	focused         bool
+	editing         bool
+	editValue       string
+	changes         *editor.ChangeTracker
+	tableName       string
+	primaryKeys     []string
+	scrollOffset    int
+	colOffset       int
+	width           int
+	height          int
+	colWidths       []int
+	errMsg          string
+	infoMsg         string
+	bannerMsg       string
+	insertedRows    int // count of locally inserted rows (at end of rows slice)
+	searching       bool
+	searchQuery     string
+	filteredIndices []int
+	searchCursor    int
 }
 
 // NewResultsModel creates a new results model.
@@ -110,6 +114,33 @@ func (m ResultsModel) IsEditing() bool {
 	return m.editing
 }
 
+// IsSearching returns whether we're in search mode.
+func (m ResultsModel) IsSearching() bool {
+	return m.searching
+}
+
+func (m *ResultsModel) applyRowFilter() {
+	if m.searchQuery == "" {
+		m.filteredIndices = nil
+		m.searchCursor = 0
+		return
+	}
+	m.filteredIndices = nil
+	for ri, row := range m.rows {
+		for _, cell := range row {
+			if FuzzyMatch(cell, m.searchQuery) {
+				m.filteredIndices = append(m.filteredIndices, ri)
+				break
+			}
+		}
+	}
+	m.searchCursor = 0
+	if len(m.filteredIndices) > 0 {
+		m.cursorRow = m.filteredIndices[0]
+		m.ensureRowVisible()
+	}
+}
+
 // HasPrimaryKey returns whether the current table has a PK.
 func (m ResultsModel) HasPrimaryKey() bool {
 	return len(m.primaryKeys) > 0
@@ -151,6 +182,9 @@ func (m ResultsModel) Update(msg tea.Msg) (ResultsModel, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if m.searching {
+			return m.updateSearchMode(msg)
+		}
 		if m.editing {
 			return m.updateEditMode(msg)
 		}
@@ -263,6 +297,59 @@ func (m ResultsModel) updateNavMode(msg tea.KeyMsg) (ResultsModel, tea.Cmd) {
 			m.cursorRow = 0
 		}
 		m.ensureRowVisible()
+	case "/":
+		m.searching = true
+		m.searchQuery = ""
+		m.filteredIndices = nil
+		m.searchCursor = 0
+	case "n":
+		if len(m.filteredIndices) > 0 {
+			m.searchCursor++
+			if m.searchCursor >= len(m.filteredIndices) {
+				m.searchCursor = 0
+			}
+			m.cursorRow = m.filteredIndices[m.searchCursor]
+			m.ensureRowVisible()
+		}
+	case "N":
+		if len(m.filteredIndices) > 0 {
+			m.searchCursor--
+			if m.searchCursor < 0 {
+				m.searchCursor = len(m.filteredIndices) - 1
+			}
+			m.cursorRow = m.filteredIndices[m.searchCursor]
+			m.ensureRowVisible()
+		}
+	}
+	return m, nil
+}
+
+func (m ResultsModel) updateSearchMode(msg tea.KeyMsg) (ResultsModel, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.searching = false
+		m.searchQuery = ""
+		m.filteredIndices = nil
+		m.searchCursor = 0
+	case "enter":
+		m.searching = false
+		if len(m.filteredIndices) > 0 {
+			m.cursorRow = m.filteredIndices[m.searchCursor]
+			m.ensureRowVisible()
+		}
+	case "backspace":
+		if len(m.searchQuery) > 0 {
+			m.searchQuery = m.searchQuery[:len(m.searchQuery)-1]
+			m.applyRowFilter()
+		}
+	default:
+		if len(msg.String()) == 1 || msg.Type == tea.KeySpace {
+			m.searchQuery += msg.String()
+			m.applyRowFilter()
+		} else if msg.Type == tea.KeyRunes {
+			m.searchQuery += string(msg.Runes)
+			m.applyRowFilter()
+		}
 	}
 	return m, nil
 }
@@ -447,12 +534,36 @@ func (m ResultsModel) View() string {
 	return borderStyle.Width(innerW).Height(innerH).Render(content)
 }
 
+func (m ResultsModel) isMatchRow(rowIdx int) bool {
+	for _, fi := range m.filteredIndices {
+		if fi == rowIdx {
+			return true
+		}
+	}
+	return false
+}
+
 func (m ResultsModel) renderTable(w, h int) string {
 	if len(m.columns) == 0 {
 		return ""
 	}
 
 	var b strings.Builder
+
+	if m.searching || m.searchQuery != "" {
+		searchDisp := SearchLabel.Render("/") + SearchInput.Render(m.searchQuery)
+		if m.searching {
+			searchDisp += SearchInput.Render("█")
+		}
+		if len(m.filteredIndices) > 0 {
+			searchDisp += DimText.Render(fmt.Sprintf(" [%d/%d]", m.searchCursor+1, len(m.filteredIndices)))
+		} else if m.searchQuery != "" {
+			searchDisp += DimText.Render(" [no matches]")
+		}
+		b.WriteString(searchDisp)
+		b.WriteString("\n")
+		h--
+	}
 
 	if m.bannerMsg != "" {
 		b.WriteString(BannerText.Render(m.bannerMsg))
@@ -524,6 +635,8 @@ func (m ResultsModel) renderTable(w, h int) string {
 				_, isModified = m.changes.GetCellEdit(m.tableName, pkVals, m.columns[ci])
 			}
 
+			isMatch := len(m.filteredIndices) > 0 && m.isMatchRow(ri)
+
 			switch {
 			case isCursor:
 				style = CellSelected
@@ -533,6 +646,8 @@ func (m ResultsModel) renderTable(w, h int) string {
 				style = NewRowText
 			case isModified:
 				style = ModifiedText
+			case isMatch:
+				style = SearchInput
 			case val == "<NULL>":
 				style = NullText
 			default:

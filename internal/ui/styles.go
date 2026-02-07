@@ -1,6 +1,27 @@
 package ui
 
-import "github.com/charmbracelet/lipgloss"
+import (
+	"regexp"
+	"strings"
+
+	"github.com/charmbracelet/lipgloss"
+)
+
+func FuzzyMatch(target, query string) bool {
+	re, err := regexp.Compile("(?i)" + query)
+	if err == nil {
+		return re.MatchString(target)
+	}
+	target = strings.ToLower(target)
+	query = strings.ToLower(query)
+	qi := 0
+	for i := 0; i < len(target) && qi < len(query); i++ {
+		if target[i] == query[qi] {
+			qi++
+		}
+	}
+	return qi == len(query)
+}
 
 // Color palette
 var (
@@ -86,6 +107,15 @@ var (
 	SidebarCursorItem = lipgloss.NewStyle().
 				PaddingLeft(1).
 				Reverse(true)
+)
+
+// Search styles
+var (
+	SearchInput = lipgloss.NewStyle().
+			Foreground(ColorAccent).
+			Bold(true)
+	SearchLabel = lipgloss.NewStyle().
+			Foreground(ColorAccent)
 )
 
 // Top bar style

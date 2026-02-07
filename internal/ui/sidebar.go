@@ -15,18 +15,22 @@ type TableSelectedMsg struct {
 
 // SidebarModel is the table browser sidebar.
 type SidebarModel struct {
-	tables   []string
-	cursor   int
-	selected string
-	focused  bool
-	width    int
-	height   int
+	tables         []string
+	filteredTables []string
+	cursor         int
+	selected       string
+	focused        bool
+	searching      bool
+	searchQuery    string
+	width          int
+	height         int
 }
 
 // NewSidebarModel creates a new sidebar with the given table list.
 func NewSidebarModel(tables []string) SidebarModel {
 	return SidebarModel{
-		tables: tables,
+		tables:         tables,
+		filteredTables: tables,
 	}
 }
 
@@ -49,8 +53,27 @@ func (m *SidebarModel) SetSize(w, h int) {
 // SetTables updates the table list.
 func (m *SidebarModel) SetTables(tables []string) {
 	m.tables = tables
-	if m.cursor >= len(tables) {
-		m.cursor = max(0, len(tables)-1)
+	m.applyFilter()
+}
+
+// IsSearching returns whether the sidebar is in search mode.
+func (m SidebarModel) IsSearching() bool {
+	return m.searching
+}
+
+func (m *SidebarModel) applyFilter() {
+	if m.searchQuery == "" {
+		m.filteredTables = m.tables
+	} else {
+		m.filteredTables = nil
+		for _, t := range m.tables {
+			if FuzzyMatch(t, m.searchQuery) {
+				m.filteredTables = append(m.filteredTables, t)
+			}
+		}
+	}
+	if m.cursor >= len(m.filteredTables) {
+		m.cursor = max(0, len(m.filteredTables)-1)
 	}
 }
 
@@ -72,22 +95,67 @@ func (m SidebarModel) Update(msg tea.Msg) (SidebarModel, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if m.searching {
+			return m.updateSearchMode(msg)
+		}
 		switch msg.String() {
 		case "up", "k":
 			if m.cursor > 0 {
 				m.cursor--
 			}
 		case "down", "j":
-			if m.cursor < len(m.tables)-1 {
+			if m.cursor < len(m.filteredTables)-1 {
 				m.cursor++
 			}
 		case "enter":
-			if len(m.tables) > 0 {
-				m.selected = m.tables[m.cursor]
+			if len(m.filteredTables) > 0 {
+				m.selected = m.filteredTables[m.cursor]
 				return m, func() tea.Msg {
 					return TableSelectedMsg{Name: m.selected}
 				}
 			}
+		case "/":
+			m.searching = true
+			m.searchQuery = ""
+		}
+	}
+	return m, nil
+}
+
+func (m SidebarModel) updateSearchMode(msg tea.KeyMsg) (SidebarModel, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.searching = false
+		m.searchQuery = ""
+		m.applyFilter()
+	case "enter":
+		m.searching = false
+		if len(m.filteredTables) > 0 {
+			m.selected = m.filteredTables[m.cursor]
+			return m, func() tea.Msg {
+				return TableSelectedMsg{Name: m.selected}
+			}
+		}
+	case "backspace":
+		if len(m.searchQuery) > 0 {
+			m.searchQuery = m.searchQuery[:len(m.searchQuery)-1]
+			m.applyFilter()
+		}
+	case "up":
+		if m.cursor > 0 {
+			m.cursor--
+		}
+	case "down":
+		if m.cursor < len(m.filteredTables)-1 {
+			m.cursor++
+		}
+	default:
+		if len(msg.String()) == 1 || msg.Type == tea.KeySpace {
+			m.searchQuery += msg.String()
+			m.applyFilter()
+		} else if msg.Type == tea.KeyRunes {
+			m.searchQuery += string(msg.Runes)
+			m.applyFilter()
 		}
 	}
 	return m, nil
@@ -116,17 +184,35 @@ func (m SidebarModel) View() string {
 	header := HeaderStyle.Render("Tables")
 	b.WriteString(header)
 	b.WriteString("\n")
-	schema := SubHeaderStyle.Render("  public")
-	b.WriteString(schema)
-	b.WriteString("\n")
 
-	linesUsed := 2
+	linesUsed := 1
 
-	if len(m.tables) == 0 {
-		b.WriteString(DimText.Render("  No tables found"))
+	if m.searching || m.searchQuery != "" {
+		searchDisp := SearchLabel.Render("/") + SearchInput.Render(m.searchQuery)
+		if m.searching {
+			searchDisp += SearchInput.Render("█")
+		}
+		b.WriteString(searchDisp)
+		b.WriteString("\n")
 		linesUsed++
 	} else {
-		for i, t := range m.tables {
+		schema := SubHeaderStyle.Render("  public")
+		b.WriteString(schema)
+		b.WriteString("\n")
+		linesUsed++
+	}
+
+	tables := m.filteredTables
+
+	if len(tables) == 0 {
+		if m.searchQuery != "" {
+			b.WriteString(DimText.Render("  No matches"))
+		} else {
+			b.WriteString(DimText.Render("  No tables found"))
+		}
+		linesUsed++
+	} else {
+		for i, t := range tables {
 			if linesUsed >= innerH {
 				break
 			}
@@ -143,7 +229,7 @@ func (m SidebarModel) View() string {
 				line = SidebarTableItem.Width(innerW).Render(label)
 			}
 			b.WriteString(line)
-			if i < len(m.tables)-1 {
+			if i < len(tables)-1 {
 				b.WriteString("\n")
 			}
 			linesUsed++

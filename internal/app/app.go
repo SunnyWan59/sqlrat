@@ -124,14 +124,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+c":
 			return m, tea.Quit
 		case "tab":
-			// Don't cycle focus when editing a cell
-			if m.activePane == ResultsPane && m.results.IsEditing() {
+			if m.activePane == ResultsPane && (m.results.IsEditing() || m.results.IsSearching()) {
+				break
+			}
+			if m.activePane == SidebarPane && m.sidebar.IsSearching() {
 				break
 			}
 			m.cycleFocus(true)
 			return m, nil
 		case "shift+tab":
-			if m.activePane == ResultsPane && m.results.IsEditing() {
+			if m.activePane == ResultsPane && (m.results.IsEditing() || m.results.IsSearching()) {
+				break
+			}
+			if m.activePane == SidebarPane && m.sidebar.IsSearching() {
 				break
 			}
 			m.cycleFocus(false)
@@ -236,11 +241,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch m.activePane {
 	case SidebarPane:
 		m.sidebar, cmd = m.sidebar.Update(msg)
+		m.statusbar.SetSearchMode(m.sidebar.IsSearching())
 	case EditorPane:
 		m.editor, cmd = m.editor.Update(msg)
 	case ResultsPane:
 		m.results, cmd = m.results.Update(msg)
 		m.statusbar.SetEditMode(m.results.IsEditing())
+		m.statusbar.SetSearchMode(m.results.IsSearching())
 	}
 
 	return m, cmd
