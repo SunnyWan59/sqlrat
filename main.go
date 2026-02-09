@@ -35,6 +35,7 @@ type pickerModel struct {
 }
 
 func newPickerModel(cfg *config.Config) pickerModel {
+	cfg.SortByLastUsed()
 	return pickerModel{cfg: cfg}
 }
 
@@ -101,6 +102,8 @@ func (m pickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.err = msg.err.Error()
 			return m, nil
 		}
+		m.cfg.TouchLastUsed(m.cursor)
+		m.cfg.Save()
 		m.done = true
 		m.db = msg.db
 		m.tables = msg.tables

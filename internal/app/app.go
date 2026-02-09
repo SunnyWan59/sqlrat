@@ -158,7 +158,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+c":
 			return m, tea.Quit
 		case "tab":
-			if m.activePane == ResultsPane && (m.results.IsEditing() || m.results.IsSearching()) {
+			if m.activePane == ResultsPane && (m.results.IsEditing() || m.results.IsSearching() || m.results.IsPreviewing()) {
 				break
 			}
 			if m.activePane == SidebarPane && m.sidebar.IsSearching() {
@@ -167,7 +167,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cycleFocus(true)
 			return m, nil
 		case "shift+tab":
-			if m.activePane == ResultsPane && (m.results.IsEditing() || m.results.IsSearching()) {
+			if m.activePane == ResultsPane && (m.results.IsEditing() || m.results.IsSearching() || m.results.IsPreviewing()) {
 				break
 			}
 			if m.activePane == SidebarPane && m.sidebar.IsSearching() {
@@ -176,6 +176,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cycleFocus(false)
 			return m, nil
 		case "ctrl+s":
+			if m.activePane == ResultsPane && m.results.IsPreviewing() {
+				break
+			}
 			if m.changes.HasChanges() || m.results.GetInsertedRowValues() != nil {
 				return m, m.commitChanges()
 			}

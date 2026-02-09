@@ -5,16 +5,19 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"time"
 )
 
 type SavedConnection struct {
-	Name     string `json:"name"`
-	Host     string `json:"host,omitempty"`
-	Port     string `json:"port,omitempty"`
-	User     string `json:"user,omitempty"`
-	Password string `json:"password,omitempty"`
-	Database string `json:"database,omitempty"`
-	URI      string `json:"uri,omitempty"`
+	Name     string    `json:"name"`
+	Host     string    `json:"host,omitempty"`
+	Port     string    `json:"port,omitempty"`
+	User     string    `json:"user,omitempty"`
+	Password string    `json:"password,omitempty"`
+	Database string    `json:"database,omitempty"`
+	URI      string    `json:"uri,omitempty"`
+	LastUsed time.Time `json:"last_used,omitempty"`
 }
 
 type Config struct {
@@ -91,4 +94,17 @@ func (c *Config) Delete(index int) {
 		return
 	}
 	c.Connections = append(c.Connections[:index], c.Connections[index+1:]...)
+}
+
+func (c *Config) TouchLastUsed(index int) {
+	if index < 0 || index >= len(c.Connections) {
+		return
+	}
+	c.Connections[index].LastUsed = time.Now()
+}
+
+func (c *Config) SortByLastUsed() {
+	sort.SliceStable(c.Connections, func(i, j int) bool {
+		return c.Connections[i].LastUsed.After(c.Connections[j].LastUsed)
+	})
 }

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -41,6 +42,10 @@ type ResultsModel struct {
 	searchQuery     string
 	filteredIndices []int
 	searchCursor    int
+	previewing      bool
+	previewScroll   int
+	previewEditing  bool
+	previewTextarea textarea.Model
 }
 
 // NewResultsModel creates a new results model.
@@ -138,6 +143,11 @@ func (m ResultsModel) IsSearching() bool {
 	return m.searching
 }
 
+// IsPreviewing returns whether we're in cell preview mode.
+func (m ResultsModel) IsPreviewing() bool {
+	return m.previewing
+}
+
 func (m *ResultsModel) applyRowFilter() {
 	if m.searchQuery == "" {
 		m.filteredIndices = nil
@@ -201,6 +211,9 @@ func (m ResultsModel) Update(msg tea.Msg) (ResultsModel, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if m.previewing {
+			return m.updatePreviewMode(msg)
+		}
 		if m.searching {
 			return m.updateSearchMode(msg)
 		}
@@ -339,6 +352,31 @@ func (m ResultsModel) updateNavMode(msg tea.KeyMsg) (ResultsModel, tea.Cmd) {
 			m.cursorRow = m.filteredIndices[m.searchCursor]
 			m.ensureRowVisible()
 		}
+	case "v":
+		if len(m.rows) > 0 && len(m.columns) > 0 {
+			val := m.displayValue(m.cursorRow, m.cursorCol)
+			if val == "<NULL>" {
+				val = ""
+			}
+			m.previewing = true
+			m.previewScroll = 0
+			m.previewEditing = false
+			ta := textarea.New()
+			ta.SetValue(val)
+			ta.CharLimit = 0
+			ta.ShowLineNumbers = true
+			pw := m.width - 6
+			if pw < 20 {
+				pw = 20
+			}
+			ph := m.height - 8
+			if ph < 4 {
+				ph = 4
+			}
+			ta.SetWidth(pw)
+			ta.SetHeight(ph)
+			m.previewTextarea = ta
+		}
 	}
 	return m, nil
 }
@@ -371,6 +409,136 @@ func (m ResultsModel) updateSearchMode(msg tea.KeyMsg) (ResultsModel, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+func (m ResultsModel) updatePreviewMode(msg tea.KeyMsg) (ResultsModel, tea.Cmd) {
+	if m.previewEditing {
+		switch msg.String() {
+		case "esc":
+			m.previewEditing = false
+			m.previewTextarea.Blur()
+			return m, nil
+		case "ctrl+s":
+			m.editValue = m.previewTextarea.Value()
+			m = m.commitCurrentCell()
+			m.previewing = false
+			m.previewEditing = false
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.previewTextarea, cmd = m.previewTextarea.Update(msg)
+		return m, cmd
+	}
+
+	switch msg.String() {
+	case "esc", "v":
+		m.previewing = false
+		m.previewScroll = 0
+	case "e":
+		if len(m.primaryKeys) == 0 && !m.isInsertedRow(m.cursorRow) {
+			if m.tableName == "" {
+				return m, func() tea.Msg {
+					return EditBlockedMsg{Reason: "Cannot edit free-form query results"}
+				}
+			}
+			return m, func() tea.Msg {
+				return EditBlockedMsg{Reason: "Cannot edit: table has no primary key"}
+			}
+		}
+		m.previewEditing = true
+		cmd := m.previewTextarea.Focus()
+		return m, cmd
+	case "j", "down":
+		m.previewScroll++
+	case "k", "up":
+		if m.previewScroll > 0 {
+			m.previewScroll--
+		}
+	case "G":
+		m.previewScroll = 99999
+	case "g":
+		m.previewScroll = 0
+	}
+	return m, nil
+}
+
+func (m ResultsModel) renderPreviewOverlay(w, h int) string {
+	var b strings.Builder
+
+	colName := ""
+	if m.cursorCol < len(m.columns) {
+		colName = m.columns[m.cursorCol]
+	}
+
+	if m.previewEditing {
+		title := HeaderStyle.Render(fmt.Sprintf("Edit: %s", colName))
+		hint := DimText.Render("Ctrl+S save | Esc cancel")
+		b.WriteString(title + "  " + hint)
+		b.WriteString("\n")
+		b.WriteString(m.previewTextarea.View())
+	} else {
+		title := HeaderStyle.Render(fmt.Sprintf("Preview: %s [row %d]", colName, m.cursorRow+1))
+		hint := DimText.Render("e edit | j/k scroll | Esc close")
+		b.WriteString(title + "  " + hint)
+		b.WriteString("\n")
+		b.WriteString(DimText.Render(strings.Repeat("─", w)))
+		b.WriteString("\n")
+
+		val := m.displayValue(m.cursorRow, m.cursorCol)
+		lines := strings.Split(wordWrap(val, w), "\n")
+
+		viewH := h - 4
+		if viewH < 1 {
+			viewH = 1
+		}
+
+		scroll := m.previewScroll
+		maxScroll := len(lines) - viewH
+		if maxScroll < 0 {
+			maxScroll = 0
+		}
+		if scroll > maxScroll {
+			scroll = maxScroll
+		}
+
+		endLine := scroll + viewH
+		if endLine > len(lines) {
+			endLine = len(lines)
+		}
+
+		for i := scroll; i < endLine; i++ {
+			b.WriteString(lines[i])
+			if i < endLine-1 {
+				b.WriteString("\n")
+			}
+		}
+
+		if len(lines) > viewH {
+			b.WriteString("\n")
+			b.WriteString(DimText.Render(fmt.Sprintf("[lines %d-%d of %d]", scroll+1, endLine, len(lines))))
+		}
+	}
+
+	return b.String()
+}
+
+func wordWrap(s string, width int) string {
+	if width <= 0 || len(s) == 0 {
+		return s
+	}
+	var result strings.Builder
+	for li, line := range strings.Split(s, "\n") {
+		if li > 0 {
+			result.WriteString("\n")
+		}
+		for len(line) > width {
+			result.WriteString(line[:width])
+			result.WriteString("\n")
+			line = line[width:]
+		}
+		result.WriteString(line)
+	}
+	return result.String()
 }
 
 func (m ResultsModel) commitCurrentCell() ResultsModel {
@@ -538,7 +706,9 @@ func (m ResultsModel) View() string {
 
 	var content string
 
-	if m.errMsg != "" {
+	if m.previewing {
+		content = m.renderPreviewOverlay(innerW, innerH)
+	} else if m.errMsg != "" {
 		content = ErrorText.Render(m.errMsg)
 	} else if len(m.columns) == 0 {
 		msg := "No rows returned"
