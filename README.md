@@ -1,2 +1,2 @@
 # SQL Rat
-ClI PSQL client. Why? Cause fuck DBeaver
+CLI PSQL client. Why? Cause fuck DBeaver
