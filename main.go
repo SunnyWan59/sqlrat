@@ -29,6 +29,7 @@ type pickerModel struct {
 	newConn    bool
 	db         *db.DB
 	tables     []string
+	databases  []string
 	width      int
 	height     int
 }
@@ -103,6 +104,7 @@ func (m pickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.done = true
 		m.db = msg.db
 		m.tables = msg.tables
+		m.databases = msg.databases
 		return m, tea.Quit
 	}
 
@@ -156,20 +158,13 @@ func (m pickerModel) View() string {
 func (m pickerModel) connectSaved() tea.Cmd {
 	conn := m.cfg.Connections[m.cursor]
 	return func() tea.Msg {
+		var d *db.DB
+		var err error
 		if conn.URI != "" {
-			d, err := db.ConnectURI(conn.URI)
-			if err != nil {
-				return connectResultMsg{err: err}
-			}
-			tables, err := d.ListTables()
-			if err != nil {
-				d.Close()
-				return connectResultMsg{err: fmt.Errorf("failed to list tables: %w", err)}
-			}
-			return connectResultMsg{db: d, tables: tables}
+			d, err = db.ConnectURI(conn.URI)
+		} else {
+			d, err = db.Connect(conn.Host, conn.Port, conn.User, conn.Password, conn.Database)
 		}
-
-		d, err := db.Connect(conn.Host, conn.Port, conn.User, conn.Password, conn.Database)
 		if err != nil {
 			return connectResultMsg{err: err}
 		}
@@ -178,7 +173,12 @@ func (m pickerModel) connectSaved() tea.Cmd {
 			d.Close()
 			return connectResultMsg{err: fmt.Errorf("failed to list tables: %w", err)}
 		}
-		return connectResultMsg{db: d, tables: tables}
+		databases, err := d.ListDatabases()
+		if err != nil {
+			d.Close()
+			return connectResultMsg{err: fmt.Errorf("failed to list databases: %w", err)}
+		}
+		return connectResultMsg{db: d, tables: tables, databases: databases}
 	}
 }
 
@@ -215,6 +215,7 @@ type connectionModel struct {
 	done       bool
 	db         *db.DB
 	tables     []string
+	databases  []string
 	savedConn  config.SavedConnection
 	cfg        *config.Config
 	width      int
@@ -222,9 +223,10 @@ type connectionModel struct {
 }
 
 type connectResultMsg struct {
-	db     *db.DB
-	tables []string
-	err    error
+	db        *db.DB
+	tables    []string
+	databases []string
+	err       error
 }
 
 const (
@@ -379,6 +381,7 @@ func (m connectionModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.db = msg.db
 		m.tables = msg.tables
+		m.databases = msg.databases
 		m.phase = phaseName
 		if m.mode == modeURI {
 			m.uriInput.Blur()
@@ -535,7 +538,13 @@ func (m connectionModel) tryConnectURI() tea.Cmd {
 			return connectResultMsg{err: fmt.Errorf("failed to list tables: %w", err)}
 		}
 
-		return connectResultMsg{db: conn, tables: tables}
+		databases, err := conn.ListDatabases()
+		if err != nil {
+			conn.Close()
+			return connectResultMsg{err: fmt.Errorf("failed to list databases: %w", err)}
+		}
+
+		return connectResultMsg{db: conn, tables: tables, databases: databases}
 	}
 }
 
@@ -574,7 +583,13 @@ func (m connectionModel) tryConnect() tea.Cmd {
 			return connectResultMsg{err: fmt.Errorf("failed to list tables: %w", err)}
 		}
 
-		return connectResultMsg{db: conn, tables: tables}
+		databases, err := conn.ListDatabases()
+		if err != nil {
+			conn.Close()
+			return connectResultMsg{err: fmt.Errorf("failed to list databases: %w", err)}
+		}
+
+		return connectResultMsg{db: conn, tables: tables, databases: databases}
 	}
 }
 
@@ -587,6 +602,7 @@ func main() {
 
 	var database *db.DB
 	var tables []string
+	var databases []string
 
 	if len(cfg.Connections) > 0 {
 		picker := newPickerModel(cfg)
@@ -609,6 +625,7 @@ func main() {
 		if !pm.newConn {
 			database = pm.db
 			tables = pm.tables
+			databases = pm.databases
 		}
 	}
 
@@ -628,6 +645,7 @@ func main() {
 
 		database = cm.db
 		tables = cm.tables
+		databases = cm.databases
 	}
 
 	if database == nil {
@@ -637,7 +655,7 @@ func main() {
 	defer database.Close()
 
 	// Phase 2: Main TUI
-	appModel := app.NewModel(database, tables)
+	appModel := app.NewModel(database, tables, databases)
 	appProgram := tea.NewProgram(appModel, tea.WithAltScreen())
 	if _, err := appProgram.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)

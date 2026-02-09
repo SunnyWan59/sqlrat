@@ -109,6 +109,25 @@ func (m *ResultsModel) SetBanner(msg string) {
 	m.bannerMsg = msg
 }
 
+// Clear resets the results pane to an empty state.
+func (m *ResultsModel) Clear() {
+	m.columns = nil
+	m.columnTypes = nil
+	m.rows = nil
+	m.cursorRow = 0
+	m.cursorCol = 0
+	m.scrollOffset = 0
+	m.colOffset = 0
+	m.editing = false
+	m.editValue = ""
+	m.errMsg = ""
+	m.infoMsg = ""
+	m.bannerMsg = ""
+	m.tableName = ""
+	m.primaryKeys = nil
+	m.insertedRows = 0
+}
+
 // IsEditing returns whether we're in edit mode.
 func (m ResultsModel) IsEditing() bool {
 	return m.editing

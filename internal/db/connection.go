@@ -17,6 +17,7 @@ type DB struct {
 	host       string
 	port       string
 	user       string
+	password   string
 	database   string
 }
 
@@ -40,6 +41,7 @@ func Connect(host, port, user, password, database string) (*DB, error) {
 		host:       host,
 		port:       port,
 		user:       user,
+		password:   password,
 		database:   database,
 	}, nil
 }
@@ -57,6 +59,7 @@ func ConnectURI(uri string) (*DB, error) {
 		port = "5432"
 	}
 	user := parsed.User.Username()
+	password, _ := parsed.User.Password()
 	database := strings.TrimPrefix(parsed.Path, "/")
 
 	// Ensure sslmode is set if not already present
@@ -80,6 +83,7 @@ func ConnectURI(uri string) (*DB, error) {
 		host:       host,
 		port:       port,
 		user:       user,
+		password:   password,
 		database:   database,
 	}, nil
 }
@@ -101,6 +105,36 @@ func (d *DB) Reconnect() error {
 		return err
 	}
 	d.Conn = conn
+	return nil
+}
+
+// Database returns the current database name.
+func (d *DB) Database() string {
+	return d.database
+}
+
+// SwitchDatabase closes the current connection and opens a new one to a different database.
+func (d *DB) SwitchDatabase(database string) error {
+	if d.Conn != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		d.Conn.Close(ctx)
+		cancel()
+	}
+
+	newConnStr := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=prefer",
+		d.user, url.QueryEscape(d.password), d.host, d.port, database)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	conn, err := pgx.Connect(ctx, newConnStr)
+	if err != nil {
+		return err
+	}
+
+	d.Conn = conn
+	d.connString = newConnStr
+	d.database = database
 	return nil
 }
 

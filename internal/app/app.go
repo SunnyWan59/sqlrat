@@ -60,6 +60,38 @@ type reconnectResultMsg struct {
 	err    error
 }
 
+// switchDBResultMsg carries the result of a database switch.
+type switchDBResultMsg struct {
+	tables    []string
+	databases []string
+	dbName    string
+	err       error
+}
+
+// copyDBResultMsg carries the result of a database copy.
+type copyDBResultMsg struct {
+	databases []string
+	target    string
+	err       error
+}
+
+// ddlRefreshMsg carries the result of a DDL-triggered table list refresh.
+type ddlRefreshMsg struct {
+	tables    []string
+	tableName string
+	tableData *tableDataMsg
+	err       error
+}
+
+// dropDBResultMsg carries the result of a database drop.
+type dropDBResultMsg struct {
+	databases    []string
+	dropped      string
+	switchedToDB string
+	tables       []string
+	err          error
+}
+
 // Model is the root Bubble Tea model.
 type Model struct {
 	activePane Pane
@@ -77,11 +109,13 @@ type Model struct {
 }
 
 // NewModel creates the root app model.
-func NewModel(database *db.DB, tables []string) Model {
+func NewModel(database *db.DB, tables []string, databases []string) Model {
 	changes := editor.NewChangeTracker()
 
 	sidebar := ui.NewSidebarModel(tables)
 	sidebar.SetFocused(true)
+	sidebar.SetDatabases(databases)
+	sidebar.SetActiveDatabase(database.Database())
 
 	editorModel := ui.NewEditorModel()
 	results := ui.NewResultsModel(changes)
@@ -155,6 +189,57 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusbar.SetMessage(msg.Reason, ui.MsgError)
 		return m, nil
 
+	case ui.DeleteDatabaseMsg:
+		m.statusbar.SetMessage(fmt.Sprintf("Dropping %s...", msg.Name), ui.MsgInfo)
+		return m, m.dropDatabase(msg.Name)
+
+	case dropDBResultMsg:
+		if msg.err != nil {
+			m.statusbar.SetMessage("Drop failed: "+msg.err.Error(), ui.MsgError)
+		} else {
+			m.sidebar.SetDatabases(msg.databases)
+			if msg.switchedToDB != "" {
+				m.sidebar.SetActiveDatabase(msg.switchedToDB)
+				m.sidebar.SetTables(msg.tables)
+				m.changes.Clear()
+				m.lastTable = ""
+				m.results.Clear()
+			}
+			m.statusbar.SetMessage(fmt.Sprintf("Dropped database %s", msg.dropped), ui.MsgSuccess)
+		}
+		return m, nil
+
+	case ui.CopyDatabaseMsg:
+		m.statusbar.SetMessage(fmt.Sprintf("Copying %s → %s...", msg.Source, msg.Target), ui.MsgInfo)
+		return m, m.copyDatabase(msg.Source, msg.Target)
+
+	case copyDBResultMsg:
+		if msg.err != nil {
+			m.statusbar.SetMessage("Copy failed: "+msg.err.Error(), ui.MsgError)
+		} else {
+			m.sidebar.SetDatabases(msg.databases)
+			m.statusbar.SetMessage(fmt.Sprintf("Created database %s", msg.target), ui.MsgSuccess)
+		}
+		return m, nil
+
+	case ui.DatabaseSelectedMsg:
+		m.statusbar.SetMessage(fmt.Sprintf("Switching to %s...", msg.Name), ui.MsgInfo)
+		return m, m.switchDatabase(msg.Name)
+
+	case switchDBResultMsg:
+		if msg.err != nil {
+			m.statusbar.SetMessage("Switch failed: "+msg.err.Error(), ui.MsgError)
+		} else {
+			m.sidebar.SetTables(msg.tables)
+			m.sidebar.SetDatabases(msg.databases)
+			m.sidebar.SetActiveDatabase(msg.dbName)
+			m.changes.Clear()
+			m.lastTable = ""
+			m.results.Clear()
+			m.statusbar.SetMessage(fmt.Sprintf("Switched to %s (%d tables)", msg.dbName, len(msg.tables)), ui.MsgSuccess)
+		}
+		return m, nil
+
 	case ui.TableSelectedMsg:
 		m.lastTable = msg.Name
 		return m, m.loadTable(msg.Name)
@@ -183,6 +268,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lastSQL = msg.SQL
 		return m, m.executeQuery(msg.SQL)
 
+	case ddlRefreshMsg:
+		if msg.err != nil {
+			m.statusbar.SetMessage("DDL refresh error: "+msg.err.Error(), ui.MsgError)
+		} else {
+			m.sidebar.SetTables(msg.tables)
+			if msg.tableData != nil && msg.tableData.err == nil {
+				m.lastTable = msg.tableName
+				m.results.SetData(msg.tableData.result.Columns, msg.tableData.result.ColumnTypes, msg.tableData.result.Rows)
+				m.results.SetTableContext(msg.tableData.tableName, msg.tableData.pks)
+				m.statusbar.SetQueryInfo(msg.tableData.result.ExecTime, msg.tableData.result.RowCount)
+				m.statusbar.SetMessage(fmt.Sprintf("Created table %s", msg.tableName), ui.MsgSuccess)
+			} else {
+				m.statusbar.SetMessage(fmt.Sprintf("Tables refreshed (%d tables)", len(msg.tables)), ui.MsgSuccess)
+			}
+		}
+		return m, nil
+
 	case queryResultMsg:
 		if msg.err != nil {
 			m.results.SetError(msg.err.Error())
@@ -195,6 +297,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if msg.execRes != nil {
 			m.statusbar.SetQueryInfo(msg.execRes.ExecTime, int(msg.execRes.RowsAffected))
 			m.statusbar.SetMessage(fmt.Sprintf("%d rows affected", msg.execRes.RowsAffected), ui.MsgSuccess)
+
+			if ddlTable := extractDDLTableName(msg.lastSQL); ddlTable != "" {
+				isCreate := isCreateTable(msg.lastSQL)
+				return m, m.refreshAfterDDL(ddlTable, isCreate)
+			}
+
 			table := m.lastTable
 			if table == "" {
 				table = extractTableName(msg.lastSQL)
@@ -401,6 +509,59 @@ func (m *Model) reconnect() tea.Cmd {
 	}
 }
 
+func (m *Model) dropDatabase(name string) tea.Cmd {
+	wasActive := m.db.Database() == name
+	return func() tea.Msg {
+		if err := m.db.DropDatabase(name); err != nil {
+			return dropDBResultMsg{err: fmt.Errorf("drop database: %w", err)}
+		}
+		databases, err := m.db.ListDatabases()
+		if err != nil {
+			return dropDBResultMsg{err: fmt.Errorf("list databases: %w", err)}
+		}
+		result := dropDBResultMsg{databases: databases, dropped: name}
+		if wasActive {
+			result.switchedToDB = m.db.Database()
+			tables, err := m.db.ListTables()
+			if err != nil {
+				return dropDBResultMsg{err: fmt.Errorf("list tables: %w", err)}
+			}
+			result.tables = tables
+		}
+		return result
+	}
+}
+
+func (m *Model) copyDatabase(source, target string) tea.Cmd {
+	return func() tea.Msg {
+		if err := m.db.CopyDatabase(source, target); err != nil {
+			return copyDBResultMsg{err: fmt.Errorf("copy database: %w", err)}
+		}
+		databases, err := m.db.ListDatabases()
+		if err != nil {
+			return copyDBResultMsg{err: fmt.Errorf("list databases: %w", err)}
+		}
+		return copyDBResultMsg{databases: databases, target: target}
+	}
+}
+
+func (m *Model) switchDatabase(name string) tea.Cmd {
+	return func() tea.Msg {
+		if err := m.db.SwitchDatabase(name); err != nil {
+			return switchDBResultMsg{err: fmt.Errorf("switch database: %w", err)}
+		}
+		tables, err := m.db.ListTables()
+		if err != nil {
+			return switchDBResultMsg{err: fmt.Errorf("list tables: %w", err)}
+		}
+		databases, err := m.db.ListDatabases()
+		if err != nil {
+			return switchDBResultMsg{err: fmt.Errorf("list databases: %w", err)}
+		}
+		return switchDBResultMsg{tables: tables, databases: databases, dbName: name}
+	}
+}
+
 func (m *Model) commitChanges() tea.Cmd {
 	return func() tea.Msg {
 		// Stage any inserted rows from the results model
@@ -440,6 +601,71 @@ func (m *Model) commitChanges() tea.Cmd {
 
 		return commitResultMsg{count: len(queries)}
 	}
+}
+
+func (m *Model) refreshAfterDDL(tableName string, loadTable bool) tea.Cmd {
+	return func() tea.Msg {
+		tables, err := m.db.ListTables()
+		if err != nil {
+			return ddlRefreshMsg{err: fmt.Errorf("list tables: %w", err)}
+		}
+		result := ddlRefreshMsg{tables: tables, tableName: tableName}
+		if loadTable {
+			pks, err := m.db.GetPrimaryKeys(tableName)
+			if err != nil {
+				result.tableData = &tableDataMsg{err: err}
+				return result
+			}
+			sql := fmt.Sprintf(`SELECT * FROM %q LIMIT 100`, tableName)
+			qr, _, err := m.db.ExecuteQuery(sql)
+			if err != nil {
+				result.tableData = &tableDataMsg{err: err}
+				return result
+			}
+			result.tableData = &tableDataMsg{
+				result:    qr,
+				tableName: tableName,
+				pks:       pks,
+			}
+		}
+		return result
+	}
+}
+
+func isCreateTable(sql string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(sql))
+	return strings.HasPrefix(upper, "CREATE TABLE") || strings.HasPrefix(upper, "CREATE UNLOGGED TABLE") || strings.HasPrefix(upper, "CREATE TEMP TABLE") || strings.HasPrefix(upper, "CREATE TEMPORARY TABLE")
+}
+
+func extractDDLTableName(sql string) string {
+	tokens := strings.Fields(strings.TrimSpace(sql))
+	upper := make([]string, len(tokens))
+	for i, t := range tokens {
+		upper[i] = strings.ToUpper(t)
+	}
+	for i, tok := range upper {
+		if tok == "TABLE" && i > 0 && (upper[i-1] == "CREATE" || upper[i-1] == "DROP" || upper[i-1] == "ALTER") {
+			idx := i + 1
+			if idx < len(upper) && (upper[idx] == "IF" || upper[idx] == "NOT") {
+				for idx < len(upper) && (upper[idx] == "IF" || upper[idx] == "NOT" || upper[idx] == "EXISTS") {
+					idx++
+				}
+			}
+			if idx < len(tokens) {
+				name := tokens[idx]
+				name = strings.Trim(name, `"'` + "`")
+				name = strings.TrimRight(name, "(;,")
+				if strings.Contains(name, ".") {
+					parts := strings.SplitN(name, ".", 2)
+					name = strings.Trim(parts[len(parts)-1], `"'`+"`")
+				}
+				if name != "" {
+					return name
+				}
+			}
+		}
+	}
+	return ""
 }
 
 func extractTableName(sql string) string {

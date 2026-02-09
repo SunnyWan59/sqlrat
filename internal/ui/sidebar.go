@@ -13,17 +13,50 @@ type TableSelectedMsg struct {
 	Name string
 }
 
+// DatabaseSelectedMsg is sent when a database is selected in the sidebar.
+type DatabaseSelectedMsg struct {
+	Name string
+}
+
+// CopyDatabaseMsg is sent when the user confirms copying a database.
+type CopyDatabaseMsg struct {
+	Source string
+	Target string
+}
+
+// DeleteDatabaseMsg is sent when the user confirms deleting a database.
+type DeleteDatabaseMsg struct {
+	Name string
+}
+
+// SidebarMode tracks whether the sidebar shows tables or databases.
+type SidebarMode int
+
+const (
+	SidebarTables SidebarMode = iota
+	SidebarDatabases
+)
+
 // SidebarModel is the table browser sidebar.
 type SidebarModel struct {
-	tables         []string
-	filteredTables []string
-	cursor         int
-	selected       string
-	focused        bool
-	searching      bool
-	searchQuery    string
-	width          int
-	height         int
+	tables            []string
+	filteredTables    []string
+	databases         []string
+	filteredDatabases []string
+	activeDatabase    string
+	mode              SidebarMode
+	cursor            int
+	selected          string
+	focused           bool
+	searching         bool
+	searchQuery       string
+	copying           bool
+	copySource        string
+	copyInput         string
+	confirmDelete     bool
+	deleteTarget      string
+	width             int
+	height            int
 }
 
 // NewSidebarModel creates a new sidebar with the given table list.
@@ -56,12 +89,40 @@ func (m *SidebarModel) SetTables(tables []string) {
 	m.applyFilter()
 }
 
-// IsSearching returns whether the sidebar is in search mode.
+// SetDatabases updates the database list.
+func (m *SidebarModel) SetDatabases(databases []string) {
+	m.databases = databases
+	m.filteredDatabases = databases
+}
+
+// SetActiveDatabase sets the currently connected database name.
+func (m *SidebarModel) SetActiveDatabase(name string) {
+	m.activeDatabase = name
+}
+
+// IsSearching returns whether the sidebar is in an input mode (search, copy, or delete confirm).
 func (m SidebarModel) IsSearching() bool {
-	return m.searching
+	return m.searching || m.copying || m.confirmDelete
 }
 
 func (m *SidebarModel) applyFilter() {
+	if m.mode == SidebarDatabases {
+		if m.searchQuery == "" {
+			m.filteredDatabases = m.databases
+		} else {
+			m.filteredDatabases = nil
+			for _, d := range m.databases {
+				if FuzzyMatch(d, m.searchQuery) {
+					m.filteredDatabases = append(m.filteredDatabases, d)
+				}
+			}
+		}
+		if m.cursor >= len(m.filteredDatabases) {
+			m.cursor = max(0, len(m.filteredDatabases)-1)
+		}
+		return
+	}
+
 	if m.searchQuery == "" {
 		m.filteredTables = m.tables
 	} else {
@@ -95,29 +156,122 @@ func (m SidebarModel) Update(msg tea.Msg) (SidebarModel, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if m.confirmDelete {
+			return m.updateDeleteConfirm(msg)
+		}
+		if m.copying {
+			return m.updateCopyMode(msg)
+		}
 		if m.searching {
 			return m.updateSearchMode(msg)
 		}
+
+		listLen := len(m.filteredTables)
+		if m.mode == SidebarDatabases {
+			listLen = len(m.filteredDatabases)
+		}
+
 		switch msg.String() {
 		case "up", "k":
 			if m.cursor > 0 {
 				m.cursor--
 			}
 		case "down", "j":
-			if m.cursor < len(m.filteredTables)-1 {
+			if m.cursor < listLen-1 {
 				m.cursor++
 			}
 		case "enter":
-			if len(m.filteredTables) > 0 {
-				m.selected = m.filteredTables[m.cursor]
-				return m, func() tea.Msg {
-					return TableSelectedMsg{Name: m.selected}
+			if m.mode == SidebarDatabases {
+				if len(m.filteredDatabases) > 0 {
+					selected := m.filteredDatabases[m.cursor]
+					return m, func() tea.Msg {
+						return DatabaseSelectedMsg{Name: selected}
+					}
 				}
+			} else {
+				if len(m.filteredTables) > 0 {
+					m.selected = m.filteredTables[m.cursor]
+					return m, func() tea.Msg {
+						return TableSelectedMsg{Name: m.selected}
+					}
+				}
+			}
+		case "c":
+			if m.mode == SidebarDatabases && len(m.filteredDatabases) > 0 {
+				m.copying = true
+				m.copySource = m.filteredDatabases[m.cursor]
+				m.copyInput = m.copySource + "_copy"
+			}
+		case "x":
+			if m.mode == SidebarDatabases && len(m.filteredDatabases) > 0 {
+				m.confirmDelete = true
+				m.deleteTarget = m.filteredDatabases[m.cursor]
+			}
+		case "D":
+			m.cursor = 0
+			m.searching = false
+			m.searchQuery = ""
+			if m.mode == SidebarDatabases {
+				m.mode = SidebarTables
+				m.applyFilter()
+			} else {
+				m.mode = SidebarDatabases
+				m.applyFilter()
 			}
 		case "/":
 			m.searching = true
 			m.searchQuery = ""
 		}
+	}
+	return m, nil
+}
+
+func (m SidebarModel) updateCopyMode(msg tea.KeyMsg) (SidebarModel, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.copying = false
+		m.copySource = ""
+		m.copyInput = ""
+	case "enter":
+		name := strings.TrimSpace(m.copyInput)
+		if name == "" {
+			return m, nil
+		}
+		source := m.copySource
+		m.copying = false
+		m.copySource = ""
+		m.copyInput = ""
+		return m, func() tea.Msg {
+			return CopyDatabaseMsg{Source: source, Target: name}
+		}
+	case "backspace":
+		if len(m.copyInput) > 0 {
+			m.copyInput = m.copyInput[:len(m.copyInput)-1]
+		}
+	case "ctrl+u":
+		m.copyInput = ""
+	default:
+		if len(msg.String()) == 1 || msg.Type == tea.KeySpace {
+			m.copyInput += msg.String()
+		} else if msg.Type == tea.KeyRunes {
+			m.copyInput += string(msg.Runes)
+		}
+	}
+	return m, nil
+}
+
+func (m SidebarModel) updateDeleteConfirm(msg tea.KeyMsg) (SidebarModel, tea.Cmd) {
+	switch msg.String() {
+	case "y", "Y":
+		name := m.deleteTarget
+		m.confirmDelete = false
+		m.deleteTarget = ""
+		return m, func() tea.Msg {
+			return DeleteDatabaseMsg{Name: name}
+		}
+	default:
+		m.confirmDelete = false
+		m.deleteTarget = ""
 	}
 	return m, nil
 }
@@ -179,60 +333,135 @@ func (m SidebarModel) View() string {
 	}
 
 	var b strings.Builder
+	linesUsed := 0
 
-	// Header
-	header := HeaderStyle.Render("Tables")
-	b.WriteString(header)
-	b.WriteString("\n")
-
-	linesUsed := 1
-
-	if m.searching || m.searchQuery != "" {
-		searchDisp := SearchLabel.Render("/") + SearchInput.Render(m.searchQuery)
-		if m.searching {
-			searchDisp += SearchInput.Render("█")
-		}
-		b.WriteString(searchDisp)
+	if m.mode == SidebarDatabases {
+		b.WriteString(HeaderStyle.Render("Databases"))
 		b.WriteString("\n")
 		linesUsed++
-	} else {
-		schema := SubHeaderStyle.Render("  public")
-		b.WriteString(schema)
-		b.WriteString("\n")
-		linesUsed++
-	}
 
-	tables := m.filteredTables
-
-	if len(tables) == 0 {
-		if m.searchQuery != "" {
-			b.WriteString(DimText.Render("  No matches"))
+		if m.confirmDelete {
+			b.WriteString(ErrorText.Render(fmt.Sprintf("  Drop %s?", m.deleteTarget)))
+			b.WriteString("\n")
+			linesUsed++
+			b.WriteString(DimText.Render("  y confirm | any key cancel"))
+			b.WriteString("\n")
+			linesUsed++
+		} else if m.copying {
+			b.WriteString(AccentText.Render(fmt.Sprintf("  Copy %s as:", m.copySource)))
+			b.WriteString("\n")
+			linesUsed++
+			copyDisp := "  " + SearchInput.Render(m.copyInput) + SearchInput.Render("█")
+			b.WriteString(copyDisp)
+			b.WriteString("\n")
+			linesUsed++
+			b.WriteString(DimText.Render("  Enter confirm | Esc cancel"))
+			b.WriteString("\n")
+			linesUsed++
+		} else if m.searching || m.searchQuery != "" {
+			searchDisp := SearchLabel.Render("/") + SearchInput.Render(m.searchQuery)
+			if m.searching {
+				searchDisp += SearchInput.Render("█")
+			}
+			b.WriteString(searchDisp)
+			b.WriteString("\n")
+			linesUsed++
 		} else {
-			b.WriteString(DimText.Render("  No tables found"))
+			b.WriteString(DimText.Render("  D tables | Enter switch | c copy | x drop"))
+			b.WriteString("\n")
+			linesUsed++
 		}
-		linesUsed++
-	} else {
-		for i, t := range tables {
-			if linesUsed >= innerH {
-				break
-			}
-			label := fmt.Sprintf("T %s", t)
-			if len(label) > innerW {
-				label = label[:innerW-3] + "..."
-			}
-			var line string
-			if i == m.cursor && m.focused {
-				line = SidebarCursorItem.Width(innerW).Render(label)
-			} else if t == m.selected {
-				line = SidebarActiveItem.Width(innerW).Render(label)
+
+		dbs := m.filteredDatabases
+		if len(dbs) == 0 {
+			if m.searchQuery != "" {
+				b.WriteString(DimText.Render("  No matches"))
 			} else {
-				line = SidebarTableItem.Width(innerW).Render(label)
-			}
-			b.WriteString(line)
-			if i < len(tables)-1 {
-				b.WriteString("\n")
+				b.WriteString(DimText.Render("  No databases found"))
 			}
 			linesUsed++
+		} else {
+			for i, d := range dbs {
+				if linesUsed >= innerH {
+					break
+				}
+				label := fmt.Sprintf("⛁ %s", d)
+				if len(label) > innerW {
+					label = label[:innerW-3] + "..."
+				}
+				var line string
+				if i == m.cursor && m.focused {
+					line = SidebarCursorItem.Width(innerW).Render(label)
+				} else if d == m.activeDatabase {
+					line = SidebarActiveItem.Width(innerW).Render(label)
+				} else {
+					line = SidebarTableItem.Width(innerW).Render(label)
+				}
+				b.WriteString(line)
+				if i < len(dbs)-1 {
+					b.WriteString("\n")
+				}
+				linesUsed++
+			}
+		}
+	} else {
+		// Header
+		header := HeaderStyle.Render("Tables")
+		b.WriteString(header)
+		b.WriteString("\n")
+		linesUsed++
+
+		if m.searching || m.searchQuery != "" {
+			searchDisp := SearchLabel.Render("/") + SearchInput.Render(m.searchQuery)
+			if m.searching {
+				searchDisp += SearchInput.Render("█")
+			}
+			b.WriteString(searchDisp)
+			b.WriteString("\n")
+			linesUsed++
+		} else {
+			dbName := m.activeDatabase
+			if dbName == "" {
+				dbName = "public"
+			}
+			schema := SubHeaderStyle.Render(fmt.Sprintf("  %s | D databases", dbName))
+			b.WriteString(schema)
+			b.WriteString("\n")
+			linesUsed++
+		}
+
+		tables := m.filteredTables
+
+		if len(tables) == 0 {
+			if m.searchQuery != "" {
+				b.WriteString(DimText.Render("  No matches"))
+			} else {
+				b.WriteString(DimText.Render("  No tables found"))
+			}
+			linesUsed++
+		} else {
+			for i, t := range tables {
+				if linesUsed >= innerH {
+					break
+				}
+				label := fmt.Sprintf("T %s", t)
+				if len(label) > innerW {
+					label = label[:innerW-3] + "..."
+				}
+				var line string
+				if i == m.cursor && m.focused {
+					line = SidebarCursorItem.Width(innerW).Render(label)
+				} else if t == m.selected {
+					line = SidebarActiveItem.Width(innerW).Render(label)
+				} else {
+					line = SidebarTableItem.Width(innerW).Render(label)
+				}
+				b.WriteString(line)
+				if i < len(tables)-1 {
+					b.WriteString("\n")
+				}
+				linesUsed++
+			}
 		}
 	}
 
@@ -245,4 +474,3 @@ func (m SidebarModel) View() string {
 	content := lipgloss.NewStyle().Width(innerW).Height(innerH).Render(b.String())
 	return borderStyle.Width(innerW).Height(innerH).Render(content)
 }
-

@@ -135,7 +135,7 @@ func (m StatusBarModel) contextHints() string {
 
 	switch m.activePane {
 	case 0: // sidebar
-		return "j/k Navigate | Enter Select | / Search | Tab Switch pane"
+		return "j/k Navigate | Enter Select | / Search | D Databases | Tab Switch pane"
 	case 1: // editor
 		return "Ctrl+E Execute | Tab Switch pane"
 	case 2: // results
