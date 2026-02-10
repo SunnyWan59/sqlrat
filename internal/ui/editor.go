@@ -98,6 +98,10 @@ func (m EditorModel) Update(msg tea.Msg) (EditorModel, tea.Cmd) {
 			if sql == "" {
 				return m, nil
 			}
+			formatted := FormatSQL(sql)
+			m.textarea.Reset()
+			m.textarea.InsertString(formatted)
+			m.clearGhost()
 			return m, func() tea.Msg {
 				return ExecuteQueryMsg{SQL: sql}
 			}
@@ -106,6 +110,10 @@ func (m EditorModel) Update(msg tea.Msg) (EditorModel, tea.Cmd) {
 			if sql == "" {
 				return m, nil
 			}
+			formatted := FormatSQL(sql)
+			m.textarea.Reset()
+			m.textarea.InsertString(formatted)
+			m.clearGhost()
 			return m, func() tea.Msg {
 				return ExecuteQueryMsg{SQL: sql}
 			}
