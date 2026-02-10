@@ -44,10 +44,12 @@ func spinnerTickCmd() tea.Cmd {
 
 // queryResultMsg carries query results back to the app.
 type queryResultMsg struct {
-	result  *db.QueryResult
-	execRes *db.ExecResult
-	err     error
-	lastSQL string
+	result    *db.QueryResult
+	execRes   *db.ExecResult
+	err       error
+	lastSQL   string
+	tableName string   // extracted table name for enabling edits on free-form SELECTs
+	pks       []string // primary keys for the extracted table, if any
 }
 
 // tableDataMsg carries table data after selecting a table.
@@ -377,7 +379,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusbar.SetMessage("Query error: "+msg.err.Error(), ui.MsgError)
 		} else if msg.result != nil {
 			m.results.SetData(msg.result.Columns, msg.result.ColumnTypes, msg.result.Rows)
-			m.results.SetTableContext("", nil) // free-form query, no CRUD context
+			// Use extracted table context so free-form SELECTs are still editable
+			m.results.SetTableContext(msg.tableName, msg.pks)
+			if msg.tableName != "" {
+				m.lastTable = msg.tableName
+			}
 			m.statusbar.SetQueryInfo(msg.result.ExecTime, msg.result.RowCount)
 			m.statusbar.SetMessage(fmt.Sprintf("Query returned %d rows", msg.result.RowCount), ui.MsgSuccess)
 		} else if msg.execRes != nil {
@@ -559,13 +565,24 @@ func (m *Model) recalcLayout() {
 
 func (m *Model) executeQuery(sql string) tea.Cmd {
 	return func() tea.Msg {
-		qr, er, err := m.db.ExecuteQuery(sql)
-		return queryResultMsg{
-			result:  qr,
-			execRes: er,
+		queryRes, execRes, err := m.db.ExecuteQuery(sql)
+		msg := queryResultMsg{
+			result:  queryRes,
+			execRes: execRes,
 			err:     err,
 			lastSQL: sql,
 		}
+		// For SELECT results, try to extract the table name and look up PKs
+		// so that free-form queries like "SELECT * FROM users" are still editable.
+		if queryRes != nil && err == nil {
+			if table := extractTableName(sql); table != "" {
+				msg.tableName = table
+				if pks, pkErr := m.db.GetPrimaryKeys(table); pkErr == nil {
+					msg.pks = pks
+				}
+			}
+		}
+		return msg
 	}
 }
 
