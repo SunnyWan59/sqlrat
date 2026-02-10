@@ -744,7 +744,7 @@ func (m ResultsModel) View() string {
 		content = m.renderTable(innerW, innerH)
 	}
 
-	return borderStyle.Width(innerW).Height(innerH).Render(content)
+	return borderStyle.Width(innerW).Height(innerH).MaxHeight(innerH + 2).Render(content)
 }
 
 func (m ResultsModel) isMatchRow(rowIdx int) bool {
@@ -822,7 +822,7 @@ func (m ResultsModel) renderTable(w, h int) string {
 		for _, ci := range visibleCols {
 			val := m.displayValue(ri, ci)
 			colW := m.colWidths[ci]
-			truncVal := truncate(val, colW)
+			truncVal := truncate(sanitizeCell(val), colW)
 
 			var style lipgloss.Style
 
@@ -902,6 +902,14 @@ func (m ResultsModel) visibleColumns(availWidth int) []int {
 		usedWidth += needed
 	}
 	return cols
+}
+
+func sanitizeCell(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", "↵")
+	s = strings.ReplaceAll(s, "\n", "↵")
+	s = strings.ReplaceAll(s, "\r", "↵")
+	s = strings.ReplaceAll(s, "\t", " ")
+	return s
 }
 
 func truncate(s string, maxLen int) string {

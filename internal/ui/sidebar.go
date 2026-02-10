@@ -50,6 +50,7 @@ type SidebarModel struct {
 	focused           bool
 	searching         bool
 	searchQuery       string
+	scrollOffset      int
 	copying           bool
 	copySource        string
 	copyInput         string
@@ -105,6 +106,40 @@ func (m SidebarModel) IsSearching() bool {
 	return m.searching || m.copying || m.confirmDelete
 }
 
+func (m *SidebarModel) ensureVisible() {
+	innerH := m.height - 2
+	if innerH < 1 {
+		innerH = 1
+	}
+	headerLines := 2
+	if m.mode == SidebarDatabases {
+		if m.copying {
+			headerLines = 4
+		} else if m.confirmDelete {
+			headerLines = 3
+		}
+	}
+	availLines := innerH - headerLines
+	listLen := len(m.filteredTables)
+	if m.mode == SidebarDatabases {
+		listLen = len(m.filteredDatabases)
+	}
+	if listLen > availLines {
+		availLines--
+	}
+	if availLines < 1 {
+		availLines = 1
+	}
+	if m.cursor < m.scrollOffset {
+		m.scrollOffset = m.cursor
+	} else if m.cursor >= m.scrollOffset+availLines {
+		m.scrollOffset = m.cursor - availLines + 1
+	}
+	if m.scrollOffset < 0 {
+		m.scrollOffset = 0
+	}
+}
+
 func (m *SidebarModel) applyFilter() {
 	if m.mode == SidebarDatabases {
 		if m.searchQuery == "" {
@@ -120,6 +155,7 @@ func (m *SidebarModel) applyFilter() {
 		if m.cursor >= len(m.filteredDatabases) {
 			m.cursor = max(0, len(m.filteredDatabases)-1)
 		}
+		m.ensureVisible()
 		return
 	}
 
@@ -136,6 +172,7 @@ func (m *SidebarModel) applyFilter() {
 	if m.cursor >= len(m.filteredTables) {
 		m.cursor = max(0, len(m.filteredTables)-1)
 	}
+	m.ensureVisible()
 }
 
 // Selected returns the currently selected table name.
@@ -175,10 +212,12 @@ func (m SidebarModel) Update(msg tea.Msg) (SidebarModel, tea.Cmd) {
 		case "up", "k":
 			if m.cursor > 0 {
 				m.cursor--
+				m.ensureVisible()
 			}
 		case "down", "j":
 			if m.cursor < listLen-1 {
 				m.cursor++
+				m.ensureVisible()
 			}
 		case "enter":
 			if m.mode == SidebarDatabases {
@@ -209,6 +248,7 @@ func (m SidebarModel) Update(msg tea.Msg) (SidebarModel, tea.Cmd) {
 			}
 		case "D":
 			m.cursor = 0
+			m.scrollOffset = 0
 			m.searching = false
 			m.searchQuery = ""
 			if m.mode == SidebarDatabases {
@@ -298,10 +338,12 @@ func (m SidebarModel) updateSearchMode(msg tea.KeyMsg) (SidebarModel, tea.Cmd) {
 	case "up":
 		if m.cursor > 0 {
 			m.cursor--
+			m.ensureVisible()
 		}
 	case "down":
 		if m.cursor < len(m.filteredTables)-1 {
 			m.cursor++
+			m.ensureVisible()
 		}
 	default:
 		if len(msg.String()) == 1 || msg.Type == tea.KeySpace {
@@ -313,6 +355,23 @@ func (m SidebarModel) updateSearchMode(msg tea.KeyMsg) (SidebarModel, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+func truncateDisplay(s string, maxWidth int) string {
+	if lipgloss.Width(s) <= maxWidth {
+		return s
+	}
+	if maxWidth <= 3 {
+		return "..."[:maxWidth]
+	}
+	runes := []rune(s)
+	for i := len(runes); i > 0; i-- {
+		candidate := string(runes[:i]) + "..."
+		if lipgloss.Width(candidate) <= maxWidth {
+			return candidate
+		}
+	}
+	return "..."
 }
 
 // View renders the sidebar.
@@ -381,26 +440,38 @@ func (m SidebarModel) View() string {
 			}
 			linesUsed++
 		} else {
-			for i, d := range dbs {
-				if linesUsed >= innerH {
-					break
-				}
-				label := fmt.Sprintf("⛁ %s", d)
-				if len(label) > innerW {
-					label = label[:innerW-3] + "..."
-				}
+			availLines := innerH - linesUsed
+			if len(dbs) > availLines {
+				availLines--
+			}
+			if availLines < 1 {
+				availLines = 1
+			}
+			startIdx := m.scrollOffset
+			endIdx := startIdx + availLines
+			if endIdx > len(dbs) {
+				endIdx = len(dbs)
+			}
+			for i := startIdx; i < endIdx; i++ {
+				d := dbs[i]
+				label := truncateDisplay(fmt.Sprintf("⛁ %s", d), innerW-1)
 				var line string
 				if i == m.cursor && m.focused {
-					line = SidebarCursorItem.Width(innerW).Render(label)
+					line = SidebarCursorItem.Width(innerW).MaxHeight(1).Render(label)
 				} else if d == m.activeDatabase {
-					line = SidebarActiveItem.Width(innerW).Render(label)
+					line = SidebarActiveItem.Width(innerW).MaxHeight(1).Render(label)
 				} else {
-					line = SidebarTableItem.Width(innerW).Render(label)
+					line = SidebarTableItem.Width(innerW).MaxHeight(1).Render(label)
 				}
 				b.WriteString(line)
-				if i < len(dbs)-1 {
+				if i < endIdx-1 {
 					b.WriteString("\n")
 				}
+				linesUsed++
+			}
+			if len(dbs) > availLines {
+				b.WriteString("\n")
+				b.WriteString(DimText.Render(fmt.Sprintf(" [%d-%d of %d]", startIdx+1, endIdx, len(dbs))))
 				linesUsed++
 			}
 		}
@@ -440,26 +511,38 @@ func (m SidebarModel) View() string {
 			}
 			linesUsed++
 		} else {
-			for i, t := range tables {
-				if linesUsed >= innerH {
-					break
-				}
-				label := fmt.Sprintf("T %s", t)
-				if len(label) > innerW {
-					label = label[:innerW-3] + "..."
-				}
+			availLines := innerH - linesUsed
+			if len(tables) > availLines {
+				availLines--
+			}
+			if availLines < 1 {
+				availLines = 1
+			}
+			startIdx := m.scrollOffset
+			endIdx := startIdx + availLines
+			if endIdx > len(tables) {
+				endIdx = len(tables)
+			}
+			for i := startIdx; i < endIdx; i++ {
+				t := tables[i]
+				label := truncateDisplay(fmt.Sprintf("T %s", t), innerW-1)
 				var line string
 				if i == m.cursor && m.focused {
-					line = SidebarCursorItem.Width(innerW).Render(label)
+					line = SidebarCursorItem.Width(innerW).MaxHeight(1).Render(label)
 				} else if t == m.selected {
-					line = SidebarActiveItem.Width(innerW).Render(label)
+					line = SidebarActiveItem.Width(innerW).MaxHeight(1).Render(label)
 				} else {
-					line = SidebarTableItem.Width(innerW).Render(label)
+					line = SidebarTableItem.Width(innerW).MaxHeight(1).Render(label)
 				}
 				b.WriteString(line)
-				if i < len(tables)-1 {
+				if i < endIdx-1 {
 					b.WriteString("\n")
 				}
+				linesUsed++
+			}
+			if len(tables) > availLines {
+				b.WriteString("\n")
+				b.WriteString(DimText.Render(fmt.Sprintf(" [%d-%d of %d]", startIdx+1, endIdx, len(tables))))
 				linesUsed++
 			}
 		}
@@ -471,6 +554,6 @@ func (m SidebarModel) View() string {
 		linesUsed++
 	}
 
-	content := lipgloss.NewStyle().Width(innerW).Height(innerH).Render(b.String())
+	content := lipgloss.NewStyle().Width(innerW).Height(innerH).MaxHeight(innerH).Render(b.String())
 	return borderStyle.Width(innerW).Height(innerH).Render(content)
 }
