@@ -133,6 +133,21 @@ func (m *ResultsModel) Clear() {
 	m.insertedRows = 0
 }
 
+// ClearInsertedRows removes all locally inserted rows.
+func (m *ResultsModel) ClearInsertedRows() {
+	if m.insertedRows > 0 {
+		m.rows = m.rows[:len(m.rows)-m.insertedRows]
+		m.insertedRows = 0
+		if m.cursorRow >= len(m.rows) && len(m.rows) > 0 {
+			m.cursorRow = len(m.rows) - 1
+		}
+		if m.cursorRow < 0 {
+			m.cursorRow = 0
+		}
+		m.ensureRowVisible()
+	}
+}
+
 // IsEditing returns whether we're in edit mode.
 func (m ResultsModel) IsEditing() bool {
 	return m.editing
@@ -542,8 +557,13 @@ func wordWrap(s string, width int) string {
 }
 
 func (m ResultsModel) commitCurrentCell() ResultsModel {
+	newValue := m.editValue
+	if newValue == "" {
+		newValue = "<NULL>"
+	}
+
 	if m.isInsertedRow(m.cursorRow) {
-		m.rows[m.cursorRow][m.cursorCol] = m.editValue
+		m.rows[m.cursorRow][m.cursorCol] = newValue
 	} else {
 		pkVals := m.pkValues(m.cursorRow)
 		m.changes.StageEdit(editor.CellEdit{
@@ -551,7 +571,7 @@ func (m ResultsModel) commitCurrentCell() ResultsModel {
 			RowPKValues: pkVals,
 			ColumnName:  m.columns[m.cursorCol],
 			OldValue:    m.rows[m.cursorRow][m.cursorCol],
-			NewValue:    m.editValue,
+			NewValue:    newValue,
 		})
 	}
 	return m
@@ -674,8 +694,12 @@ func (m ResultsModel) GetInsertedRowValues() []editor.RowInsert {
 	for i := startIdx; i < len(m.rows); i++ {
 		vals := make(map[string]string)
 		for j, col := range m.columns {
-			if j < len(m.rows[i]) && m.rows[i][j] != "" {
-				vals[col] = m.rows[i][j]
+			if j < len(m.rows[i]) {
+				val := m.rows[i][j]
+				if val == "" {
+					val = "<NULL>"
+				}
+				vals[col] = val
 			}
 		}
 		if len(vals) > 0 {

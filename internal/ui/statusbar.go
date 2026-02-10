@@ -89,7 +89,7 @@ func (m StatusBarModel) View() string {
 	// Right side: pending changes + query info
 	var rightParts []string
 	if m.pendingChanges > 0 {
-		rightParts = append(rightParts, fmt.Sprintf("Pending: %d | Ctrl+S to commit", m.pendingChanges))
+		rightParts = append(rightParts, fmt.Sprintf("Pending: %d | Ctrl+S commit | Ctrl+X clear", m.pendingChanges))
 	}
 	if m.queryTime > 0 {
 		rightParts = append(rightParts, fmt.Sprintf("%d rows in %s", m.rowCount, m.queryTime.Round(time.Millisecond)))

@@ -34,10 +34,10 @@ func tickCmd() tea.Cmd {
 
 // queryResultMsg carries query results back to the app.
 type queryResultMsg struct {
-	result   *db.QueryResult
-	execRes  *db.ExecResult
-	err      error
-	lastSQL  string
+	result  *db.QueryResult
+	execRes *db.ExecResult
+	err     error
+	lastSQL string
 }
 
 // tableDataMsg carries table data after selecting a table.
@@ -94,18 +94,19 @@ type dropDBResultMsg struct {
 
 // Model is the root Bubble Tea model.
 type Model struct {
-	activePane Pane
-	sidebar    ui.SidebarModel
-	editor     ui.EditorModel
-	results    ui.ResultsModel
-	statusbar  ui.StatusBarModel
-	db         *db.DB
-	changes    *editor.ChangeTracker
-	width      int
-	height     int
-	lastSQL       string
-	lastTable     string
-	pendingDMLMsg string
+	activePane        Pane
+	sidebar           ui.SidebarModel
+	editor            ui.EditorModel
+	results           ui.ResultsModel
+	statusbar         ui.StatusBarModel
+	db                *db.DB
+	changes           *editor.ChangeTracker
+	width             int
+	height            int
+	lastSQL           string
+	lastTable         string
+	pendingDMLMsg     string
+	confirmClearEdits bool
 }
 
 // NewModel creates the root app model.
@@ -153,6 +154,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tickCmd()
 
 	case tea.KeyMsg:
+		if m.confirmClearEdits {
+			switch msg.String() {
+			case "y", "Y":
+				m.changes.Clear()
+				m.results.ClearInsertedRows()
+				m.confirmClearEdits = false
+				m.statusbar.SetMessage("All changes cleared", ui.MsgSuccess)
+				return m, nil
+			default:
+				m.confirmClearEdits = false
+				m.statusbar.SetMessage("Cancelled", ui.MsgInfo)
+				return m, nil
+			}
+		}
+
 		// Global shortcuts
 		switch msg.String() {
 		case "ctrl+c":
@@ -162,6 +178,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 			if m.activePane == SidebarPane && m.sidebar.IsSearching() {
+				break
+			}
+			if m.activePane == EditorPane && m.editor.HasGhost() {
 				break
 			}
 			m.cycleFocus(true)
@@ -186,6 +205,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+r":
 			m.statusbar.SetMessage("Reconnecting...", ui.MsgInfo)
 			return m, m.reconnect()
+		case "ctrl+x":
+			if m.changes.HasChanges() || m.results.GetInsertedRowValues() != nil {
+				m.confirmClearEdits = true
+				m.statusbar.SetMessage("Clear all pending changes? (y/n)", ui.MsgInfo)
+				return m, nil
+			}
 		}
 
 	case ui.EditBlockedMsg:
@@ -656,7 +681,7 @@ func extractDDLTableName(sql string) string {
 			}
 			if idx < len(tokens) {
 				name := tokens[idx]
-				name = strings.Trim(name, `"'` + "`")
+				name = strings.Trim(name, `"'`+"`")
 				name = strings.TrimRight(name, "(;,")
 				if strings.Contains(name, ".") {
 					parts := strings.SplitN(name, ".", 2)

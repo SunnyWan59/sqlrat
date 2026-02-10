@@ -159,7 +159,7 @@ func (ct *ChangeTracker) GenerateSQL() ([]string, [][]interface{}) {
 		i := 1
 		for col, val := range ins.Values {
 			cols = append(cols, fmt.Sprintf("%q", col))
-			if val == "NULL" {
+			if val == "<NULL>" {
 				placeholders = append(placeholders, "NULL")
 			} else {
 				placeholders = append(placeholders, fmt.Sprintf("$%d", i))
@@ -179,7 +179,7 @@ func (ct *ChangeTracker) GenerateSQL() ([]string, [][]interface{}) {
 	for _, edit := range ct.Edits {
 		args := []interface{}{}
 		var setClause string
-		if edit.NewValue == "NULL" {
+		if edit.NewValue == "<NULL>" {
 			setClause = fmt.Sprintf("%q = NULL", edit.ColumnName)
 		} else {
 			setClause = fmt.Sprintf("%q = $1", edit.ColumnName)
@@ -189,9 +189,13 @@ func (ct *ChangeTracker) GenerateSQL() ([]string, [][]interface{}) {
 		whereParts := make([]string, 0, len(edit.RowPKValues))
 		paramIdx := len(args) + 1
 		for col, val := range edit.RowPKValues {
-			whereParts = append(whereParts, fmt.Sprintf("%q = $%d", col, paramIdx))
-			args = append(args, val)
-			paramIdx++
+			if val == "<NULL>" {
+				whereParts = append(whereParts, fmt.Sprintf("%q IS NULL", col))
+			} else {
+				whereParts = append(whereParts, fmt.Sprintf("%q = $%d", col, paramIdx))
+				args = append(args, val)
+				paramIdx++
+			}
 		}
 
 		q := fmt.Sprintf(`UPDATE %q SET %s WHERE %s`,
@@ -208,9 +212,13 @@ func (ct *ChangeTracker) GenerateSQL() ([]string, [][]interface{}) {
 		whereParts := make([]string, 0, len(del.RowPKValues))
 		i := 1
 		for col, val := range del.RowPKValues {
-			whereParts = append(whereParts, fmt.Sprintf("%q = $%d", col, i))
-			args = append(args, val)
-			i++
+			if val == "<NULL>" {
+				whereParts = append(whereParts, fmt.Sprintf("%q IS NULL", col))
+			} else {
+				whereParts = append(whereParts, fmt.Sprintf("%q = $%d", col, i))
+				args = append(args, val)
+				i++
+			}
 		}
 		q := fmt.Sprintf(`DELETE FROM %q WHERE %s`,
 			del.TableName,
