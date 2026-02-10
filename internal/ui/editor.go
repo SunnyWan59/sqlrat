@@ -146,6 +146,13 @@ func (m EditorModel) Value() string {
 	return m.textarea.Value()
 }
 
+// SetValue replaces the editor content with the given text.
+func (m *EditorModel) SetValue(s string) {
+	m.textarea.Reset()
+	m.textarea.InsertString(s)
+	m.clearGhost()
+}
+
 func (m *EditorModel) clearGhost() {
 	m.ghost = ""
 	m.ghostFull = ""
@@ -268,7 +275,7 @@ func (m EditorModel) View() string {
 	}
 
 	titleLeft := HeaderStyle.Render("SQL Editor")
-	titleRight := DimText.Render("Ctrl+J line | Ctrl+E all")
+	titleRight := DimText.Render("Ctrl+J line | Ctrl+E all | Ctrl+O scripts")
 	gap := innerW - lipgloss.Width(titleLeft) - lipgloss.Width(titleRight)
 	if gap < 1 {
 		gap = 1

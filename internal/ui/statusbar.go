@@ -137,7 +137,7 @@ func (m StatusBarModel) contextHints() string {
 	case 0: // sidebar
 		return "j/k Navigate | Enter Select | / Search | D Databases | Tab Switch pane"
 	case 1: // editor
-		return "Ctrl+E Execute | Tab Switch pane"
+		return "Ctrl+J Line | Ctrl+E All | Ctrl+O Scripts | Tab Switch pane"
 	case 2: // results
 		return "hjkl Navigate | e Edit | d Delete | a Add | / Search | n/N Next/Prev match"
 	default:

@@ -9,6 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"cli-sql/internal/config"
 	"cli-sql/internal/db"
 	"cli-sql/internal/editor"
 	"cli-sql/internal/ui"
@@ -99,6 +100,7 @@ type Model struct {
 	editor            ui.EditorModel
 	results           ui.ResultsModel
 	statusbar         ui.StatusBarModel
+	scriptsModal      ui.ScriptsModalModel
 	db                *db.DB
 	changes           *editor.ChangeTracker
 	width             int
@@ -107,6 +109,7 @@ type Model struct {
 	lastTable         string
 	pendingDMLMsg     string
 	confirmClearEdits bool
+	currentScript     string
 }
 
 // NewModel creates the root app model.
@@ -119,18 +122,26 @@ func NewModel(database *db.DB, tables []string, databases []string) Model {
 	sidebar.SetActiveDatabase(database.Database())
 
 	editorModel := ui.NewEditorModel()
+
+	autosaved, _ := config.LoadAutosave()
+	if autosaved != "" {
+		editorModel.SetValue(autosaved)
+	}
+
 	results := ui.NewResultsModel(changes)
 	statusbar := ui.NewStatusBarModel()
 	statusbar.SetActivePane(0)
+	scriptsModal := ui.NewScriptsModalModel()
 
 	return Model{
-		activePane: SidebarPane,
-		sidebar:    sidebar,
-		editor:     editorModel,
-		results:    results,
-		statusbar:  statusbar,
-		db:         database,
-		changes:    changes,
+		activePane:   SidebarPane,
+		sidebar:      sidebar,
+		editor:       editorModel,
+		results:      results,
+		statusbar:    statusbar,
+		scriptsModal: scriptsModal,
+		db:           database,
+		changes:      changes,
 	}
 }
 
@@ -146,6 +157,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.recalcLayout()
+		m.scriptsModal.SetSize(msg.Width, msg.Height)
 		return m, nil
 
 	case tickMsg:
@@ -153,7 +165,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusbar.SetPendingChanges(m.changes.PendingCount())
 		return m, tickCmd()
 
+	case ui.ScriptLoadedMsg:
+		m.editor.SetValue(msg.Content)
+		m.currentScript = msg.Name
+		m.statusbar.SetMessage(fmt.Sprintf("Loaded %s", msg.Name), ui.MsgSuccess)
+		return m, nil
+
+	case ui.ScriptSavedMsg:
+		m.currentScript = msg.Name
+		m.statusbar.SetMessage(fmt.Sprintf("Saved %s", msg.Name), ui.MsgSuccess)
+		return m, nil
+
+	case ui.ScriptModalClosedMsg:
+		return m, nil
+
 	case tea.KeyMsg:
+		if m.scriptsModal.Visible() {
+			var cmd tea.Cmd
+			m.scriptsModal, cmd = m.scriptsModal.Update(msg)
+			return m, cmd
+		}
+
 		if m.confirmClearEdits {
 			switch msg.String() {
 			case "y", "Y":
@@ -172,6 +204,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Global shortcuts
 		switch msg.String() {
 		case "ctrl+c":
+			config.SaveAutosave(m.editor.Value())
 			return m, tea.Quit
 		case "tab":
 			if m.activePane == ResultsPane && (m.results.IsEditing() || m.results.IsSearching() || m.results.IsPreviewing()) {
@@ -211,6 +244,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.statusbar.SetMessage("Clear all pending changes? (y/n)", ui.MsgInfo)
 				return m, nil
 			}
+		case "ctrl+o":
+			m.scriptsModal.Open(m.editor.Value())
+			return m, nil
 		}
 
 	case ui.EditBlockedMsg:
@@ -428,6 +464,11 @@ func (m Model) View() string {
 	mainArea := lipgloss.JoinHorizontal(lipgloss.Top, sidebarView, rightPane)
 
 	statusView := m.statusbar.View()
+
+	if m.scriptsModal.Visible() {
+		m.scriptsModal.SetSize(m.width, m.height)
+		return m.scriptsModal.View()
+	}
 
 	return lipgloss.JoinVertical(lipgloss.Left, topBar, mainArea, statusView)
 }

@@ -108,3 +108,93 @@ func (c *Config) SortByLastUsed() {
 		return c.Connections[i].LastUsed.After(c.Connections[j].LastUsed)
 	})
 }
+
+func scriptsDir() (string, error) {
+	dir, err := configDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "scripts"), nil
+}
+
+func SaveAutosave(content string) error {
+	dir, err := configDir()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, "autosave.sql"), []byte(content), 0600)
+}
+
+func LoadAutosave() (string, error) {
+	dir, err := configDir()
+	if err != nil {
+		return "", err
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "autosave.sql"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	return string(data), nil
+}
+
+func ListScripts() ([]string, error) {
+	dir, err := scriptsDir()
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var scripts []string
+	for _, e := range entries {
+		if !e.IsDir() && filepath.Ext(e.Name()) == ".sql" {
+			scripts = append(scripts, e.Name())
+		}
+	}
+	sort.Strings(scripts)
+	return scripts, nil
+}
+
+func LoadScript(name string) (string, error) {
+	dir, err := scriptsDir()
+	if err != nil {
+		return "", err
+	}
+	data, err := os.ReadFile(filepath.Join(dir, name))
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+func SaveScript(name string, content string) error {
+	dir, err := scriptsDir()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	if filepath.Ext(name) != ".sql" {
+		name += ".sql"
+	}
+	return os.WriteFile(filepath.Join(dir, name), []byte(content), 0600)
+}
+
+func DeleteScript(name string) error {
+	dir, err := scriptsDir()
+	if err != nil {
+		return err
+	}
+	return os.Remove(filepath.Join(dir, name))
+}
