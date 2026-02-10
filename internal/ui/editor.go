@@ -26,6 +26,12 @@ type EditorModel struct {
 	ghost           string
 	ghostFull       string
 	ghostPartialLen int
+	tableNames      []string
+}
+
+// SetTableNames updates the list of table names used for autocomplete.
+func (m *EditorModel) SetTableNames(names []string) {
+	m.tableNames = names
 }
 
 // NewEditorModel creates a new SQL editor.
@@ -213,6 +219,17 @@ func (m *EditorModel) updateGhost() {
 		if strings.HasPrefix(kw, partial) && kw != partial {
 			m.ghost = kw[len(partial):]
 			m.ghostFull = kw
+			m.ghostPartialLen = end - start
+			return
+		}
+	}
+
+	partialLower := strings.ToLower(line[start:end])
+	for _, tn := range m.tableNames {
+		lower := strings.ToLower(tn)
+		if strings.HasPrefix(lower, partialLower) && lower != partialLower {
+			m.ghost = tn[len(partialLower):]
+			m.ghostFull = tn
 			m.ghostPartialLen = end - start
 			return
 		}

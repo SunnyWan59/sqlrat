@@ -33,6 +33,15 @@ func tickCmd() tea.Cmd {
 	})
 }
 
+// spinnerTickMsg drives the background-copy spinner animation.
+type spinnerTickMsg struct{}
+
+func spinnerTickCmd() tea.Cmd {
+	return tea.Tick(120*time.Millisecond, func(t time.Time) tea.Msg {
+		return spinnerTickMsg{}
+	})
+}
+
 // queryResultMsg carries query results back to the app.
 type queryResultMsg struct {
 	result  *db.QueryResult
@@ -122,6 +131,7 @@ func NewModel(database *db.DB, tables []string, databases []string) Model {
 	sidebar.SetActiveDatabase(database.Database())
 
 	editorModel := ui.NewEditorModel()
+	editorModel.SetTableNames(tables)
 
 	autosaved, _ := config.LoadAutosave()
 	if autosaved != "" {
@@ -265,6 +275,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.switchedToDB != "" {
 				m.sidebar.SetActiveDatabase(msg.switchedToDB)
 				m.sidebar.SetTables(msg.tables)
+				m.editor.SetTableNames(msg.tables)
 				m.changes.Clear()
 				m.lastTable = ""
 				m.results.Clear()
@@ -274,15 +285,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case ui.CopyDatabaseMsg:
-		m.statusbar.SetMessage(fmt.Sprintf("Copying %s → %s...", msg.Source, msg.Target), ui.MsgInfo)
-		return m, m.copyDatabase(msg.Source, msg.Target)
+		m.statusbar.SetCopyingDB(true, msg.Target)
+		m.statusbar.SetMessage(fmt.Sprintf("Copying %s → %s…", msg.Source, msg.Target), ui.MsgInfo)
+		return m, tea.Batch(m.copyDatabase(msg.Source, msg.Target), spinnerTickCmd())
 
 	case copyDBResultMsg:
+		m.statusbar.SetCopyingDB(false, "")
 		if msg.err != nil {
 			m.statusbar.SetMessage("Copy failed: "+msg.err.Error(), ui.MsgError)
 		} else {
 			m.sidebar.SetDatabases(msg.databases)
 			m.statusbar.SetMessage(fmt.Sprintf("Created database %s", msg.target), ui.MsgSuccess)
+		}
+		return m, nil
+
+	case spinnerTickMsg:
+		if m.statusbar.IsCopyingDB() {
+			m.statusbar.AdvanceSpinner()
+			return m, spinnerTickCmd()
 		}
 		return m, nil
 
@@ -295,6 +315,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusbar.SetMessage("Switch failed: "+msg.err.Error(), ui.MsgError)
 		} else {
 			m.sidebar.SetTables(msg.tables)
+			m.editor.SetTableNames(msg.tables)
 			m.sidebar.SetDatabases(msg.databases)
 			m.sidebar.SetActiveDatabase(msg.dbName)
 			m.changes.Clear()
@@ -337,6 +358,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusbar.SetMessage("DDL refresh error: "+msg.err.Error(), ui.MsgError)
 		} else {
 			m.sidebar.SetTables(msg.tables)
+			m.editor.SetTableNames(msg.tables)
 			if msg.tableData != nil && msg.tableData.err == nil {
 				m.lastTable = msg.tableName
 				m.results.SetData(msg.tableData.result.Columns, msg.tableData.result.ColumnTypes, msg.tableData.result.Rows)
@@ -398,6 +420,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusbar.SetMessage("Reconnect failed: "+msg.err.Error(), ui.MsgError)
 		} else {
 			m.sidebar.SetTables(msg.tables)
+			m.editor.SetTableNames(msg.tables)
 			m.changes.Clear()
 			m.statusbar.SetMessage(fmt.Sprintf("Reconnected (%d tables)", len(msg.tables)), ui.MsgSuccess)
 			// Reload active table if one was selected

@@ -17,6 +17,8 @@ const (
 	MsgError
 )
 
+var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
 // StatusBarModel is the context-aware status bar at the bottom.
 type StatusBarModel struct {
 	message        string
@@ -29,6 +31,9 @@ type StatusBarModel struct {
 	queryTime      time.Duration
 	rowCount       int
 	width          int
+	copyingDB      bool
+	copyingDBLabel string
+	spinnerFrame   int
 }
 
 // NewStatusBarModel creates a new status bar.
@@ -74,6 +79,23 @@ func (m *StatusBarModel) SetQueryInfo(elapsed time.Duration, rowCount int) {
 	m.rowCount = rowCount
 }
 
+// SetCopyingDB sets or clears the background database copy indicator.
+func (m *StatusBarModel) SetCopyingDB(active bool, label string) {
+	m.copyingDB = active
+	m.copyingDBLabel = label
+	m.spinnerFrame = 0
+}
+
+// AdvanceSpinner moves to the next spinner frame.
+func (m *StatusBarModel) AdvanceSpinner() {
+	m.spinnerFrame = (m.spinnerFrame + 1) % len(spinnerFrames)
+}
+
+// IsCopyingDB returns whether a background database copy is in progress.
+func (m StatusBarModel) IsCopyingDB() bool {
+	return m.copyingDB
+}
+
 // ClearExpiredMessage clears success messages after 3 seconds.
 func (m *StatusBarModel) ClearExpiredMessage() {
 	if m.messageType == MsgSuccess && time.Since(m.messageTime) > 3*time.Second {
@@ -86,8 +108,12 @@ func (m StatusBarModel) View() string {
 	// Left side: keybinding hints
 	hints := m.contextHints()
 
-	// Right side: pending changes + query info
+	// Right side: pending changes + query info + copy indicator
 	var rightParts []string
+	if m.copyingDB {
+		frame := spinnerFrames[m.spinnerFrame%len(spinnerFrames)]
+		rightParts = append(rightParts, fmt.Sprintf("%s Copying %s…", frame, m.copyingDBLabel))
+	}
 	if m.pendingChanges > 0 {
 		rightParts = append(rightParts, fmt.Sprintf("Pending: %d | Ctrl+S commit | Ctrl+X clear", m.pendingChanges))
 	}
