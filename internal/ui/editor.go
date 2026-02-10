@@ -17,6 +17,12 @@ type ExecuteQueryMsg struct {
 
 var GhostStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#555555"))
 
+type ghostCandidate struct {
+	full    string
+	suffix  string
+	partial int
+}
+
 // EditorModel wraps a textarea for SQL editing.
 type EditorModel struct {
 	textarea        textarea.Model
@@ -26,6 +32,8 @@ type EditorModel struct {
 	ghost           string
 	ghostFull       string
 	ghostPartialLen int
+	ghostMatches    []ghostCandidate
+	ghostIndex      int
 	tableNames      []string
 }
 
@@ -129,15 +137,31 @@ func (m EditorModel) Update(msg tea.Msg) (EditorModel, tea.Cmd) {
 					m.textarea, _ = m.textarea.Update(tea.KeyMsg{Type: tea.KeyBackspace})
 				}
 				m.textarea.InsertString(m.ghostFull)
-				m.ghost = ""
-				m.ghostFull = ""
-				m.ghostPartialLen = 0
+				m.clearGhost()
 				m.updateGhost()
 				return m, nil
 			}
 			m.textarea.InsertString("  ")
 			m.updateGhost()
 			return m, nil
+		case "up":
+			if len(m.ghostMatches) > 1 {
+				m.ghostIndex--
+				if m.ghostIndex < 0 {
+					m.ghostIndex = len(m.ghostMatches) - 1
+				}
+				m.applyGhostIndex()
+				return m, nil
+			}
+		case "down":
+			if len(m.ghostMatches) > 1 {
+				m.ghostIndex++
+				if m.ghostIndex >= len(m.ghostMatches) {
+					m.ghostIndex = 0
+				}
+				m.applyGhostIndex()
+				return m, nil
+			}
 		}
 	}
 
@@ -163,6 +187,15 @@ func (m *EditorModel) clearGhost() {
 	m.ghost = ""
 	m.ghostFull = ""
 	m.ghostPartialLen = 0
+	m.ghostMatches = nil
+	m.ghostIndex = 0
+}
+
+func (m *EditorModel) applyGhostIndex() {
+	c := m.ghostMatches[m.ghostIndex]
+	m.ghost = c.suffix
+	m.ghostFull = c.full
+	m.ghostPartialLen = c.partial
 }
 
 func (m *EditorModel) updateGhost() {
@@ -214,13 +247,17 @@ func (m *EditorModel) updateGhost() {
 		return
 	}
 
+	pLen := end - start
+	var matches []ghostCandidate
+
 	allKeywords := append(sqlKeywords, sqlFunctions...)
 	for _, kw := range allKeywords {
 		if strings.HasPrefix(kw, partial) && kw != partial {
-			m.ghost = kw[len(partial):]
-			m.ghostFull = kw
-			m.ghostPartialLen = end - start
-			return
+			matches = append(matches, ghostCandidate{
+				full:    kw,
+				suffix:  kw[len(partial):],
+				partial: pLen,
+			})
 		}
 	}
 
@@ -228,14 +265,22 @@ func (m *EditorModel) updateGhost() {
 	for _, tn := range m.tableNames {
 		lower := strings.ToLower(tn)
 		if strings.HasPrefix(lower, partialLower) && lower != partialLower {
-			m.ghost = tn[len(partialLower):]
-			m.ghostFull = tn
-			m.ghostPartialLen = end - start
-			return
+			matches = append(matches, ghostCandidate{
+				full:    tn,
+				suffix:  tn[len(partialLower):],
+				partial: pLen,
+			})
 		}
 	}
 
-	m.clearGhost()
+	if len(matches) == 0 {
+		m.clearGhost()
+		return
+	}
+
+	m.ghostMatches = matches
+	m.ghostIndex = 0
+	m.applyGhostIndex()
 }
 
 func (m EditorModel) statementAtCursor() string {
