@@ -1,170 +1,91 @@
 package claude
 
 import (
-	"bytes"
-	"encoding/json"
+	"context"
 	"fmt"
-	"io"
-	"net/http"
-	"time"
+
+	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/option"
 )
 
 const (
-	apiURL       = "https://api.anthropic.com/v1/messages"
-	apiVersion   = "2023-06-01"
-	defaultModel = "claude-sonnet-4-20250514"
+	defaultMaxTokens = 4096
 )
 
 type Client struct {
-	apiKey     string
-	httpClient *http.Client
+	client anthropic.Client
 }
 
 type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-}
-
-type Request struct {
-	Model     string    `json:"model"`
-	MaxTokens int       `json:"max_tokens"`
-	Messages  []Message `json:"messages"`
-	System    string    `json:"system,omitempty"`
-}
-
-type Response struct {
-	ID      string `json:"id"`
-	Type    string `json:"type"`
-	Role    string `json:"role"`
-	Content []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	} `json:"content"`
-	Model        string `json:"model"`
-	StopReason   string `json:"stop_reason"`
-	Usage        Usage  `json:"usage"`
-	ErrorMessage string `json:"error,omitempty"`
-}
-
-type Usage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	Role    string
+	Content string
 }
 
 func NewClient(apiKey string) *Client {
 	return &Client{
-		apiKey: apiKey,
-		httpClient: &http.Client{
-			Timeout: 60 * time.Second,
-		},
+		client: anthropic.NewClient(
+			option.WithAPIKey(apiKey),
+		),
 	}
 }
 
 func (c *Client) SendMessage(prompt string, systemPrompt string) (string, error) {
-	req := Request{
-		Model:     defaultModel,
-		MaxTokens: 4096,
-		Messages: []Message{
-			{
-				Role:    "user",
-				Content: prompt,
-			},
+	params := anthropic.MessageNewParams{
+		Model:     anthropic.ModelClaudeSonnet4_20250514,
+		MaxTokens: defaultMaxTokens,
+		Messages: []anthropic.MessageParam{
+			anthropic.NewUserMessage(anthropic.NewTextBlock(prompt)),
 		},
 	}
 
 	if systemPrompt != "" {
-		req.System = systemPrompt
+		params.System = []anthropic.TextBlockParam{
+			{Text: systemPrompt},
+		}
 	}
 
-	jsonData, err := json.Marshal(req)
+	msg, err := c.client.Messages.New(context.Background(), params)
 	if err != nil {
-		return "", fmt.Errorf("marshal request: %w", err)
+		return "", fmt.Errorf("send message: %w", err)
 	}
 
-	httpReq, err := http.NewRequest("POST", apiURL, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return "", fmt.Errorf("create request: %w", err)
-	}
-
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("x-api-key", c.apiKey)
-	httpReq.Header.Set("anthropic-version", apiVersion)
-
-	resp, err := c.httpClient.Do(httpReq)
-	if err != nil {
-		return "", fmt.Errorf("send request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("read response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(body))
-	}
-
-	var apiResp Response
-	if err := json.Unmarshal(body, &apiResp); err != nil {
-		return "", fmt.Errorf("unmarshal response: %w", err)
-	}
-
-	if len(apiResp.Content) == 0 {
+	if len(msg.Content) == 0 {
 		return "", fmt.Errorf("empty response from API")
 	}
 
-	return apiResp.Content[0].Text, nil
+	return msg.Content[0].Text, nil
 }
 
 func (c *Client) SendConversation(messages []Message, systemPrompt string) (string, error) {
-	req := Request{
-		Model:     defaultModel,
-		MaxTokens: 4096,
-		Messages:  messages,
+	msgParams := make([]anthropic.MessageParam, len(messages))
+	for i, msg := range messages {
+		if msg.Role == "user" {
+			msgParams[i] = anthropic.NewUserMessage(anthropic.NewTextBlock(msg.Content))
+		} else {
+			msgParams[i] = anthropic.NewAssistantMessage(anthropic.NewTextBlock(msg.Content))
+		}
+	}
+
+	params := anthropic.MessageNewParams{
+		Model:     anthropic.ModelClaudeSonnet4_20250514,
+		MaxTokens: defaultMaxTokens,
+		Messages:  msgParams,
 	}
 
 	if systemPrompt != "" {
-		req.System = systemPrompt
+		params.System = []anthropic.TextBlockParam{
+			{Text: systemPrompt},
+		}
 	}
 
-	jsonData, err := json.Marshal(req)
+	msg, err := c.client.Messages.New(context.Background(), params)
 	if err != nil {
-		return "", fmt.Errorf("marshal request: %w", err)
+		return "", fmt.Errorf("send conversation: %w", err)
 	}
 
-	httpReq, err := http.NewRequest("POST", apiURL, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return "", fmt.Errorf("create request: %w", err)
-	}
-
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("x-api-key", c.apiKey)
-	httpReq.Header.Set("anthropic-version", apiVersion)
-
-	resp, err := c.httpClient.Do(httpReq)
-	if err != nil {
-		return "", fmt.Errorf("send request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("read response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(body))
-	}
-
-	var apiResp Response
-	if err := json.Unmarshal(body, &apiResp); err != nil {
-		return "", fmt.Errorf("unmarshal response: %w", err)
-	}
-
-	if len(apiResp.Content) == 0 {
+	if len(msg.Content) == 0 {
 		return "", fmt.Errorf("empty response from API")
 	}
 
-	return apiResp.Content[0].Text, nil
+	return msg.Content[0].Text, nil
 }
