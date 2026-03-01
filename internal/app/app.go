@@ -9,9 +9,11 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"cli-sql/internal/claude"
 	"cli-sql/internal/config"
 	"cli-sql/internal/db"
 	"cli-sql/internal/editor"
+	"cli-sql/internal/env"
 	"cli-sql/internal/ui"
 )
 
@@ -104,6 +106,11 @@ type dropDBResultMsg struct {
 	err          error
 }
 
+type claudeResponseMsg struct {
+	response string
+	err      error
+}
+
 // Model is the root Bubble Tea model.
 type Model struct {
 	activePane        Pane
@@ -112,6 +119,7 @@ type Model struct {
 	results           ui.ResultsModel
 	statusbar         ui.StatusBarModel
 	scriptsModal      ui.ScriptsModalModel
+	claudeModal       ui.ClaudeModalModel
 	db                *db.DB
 	changes           *editor.ChangeTracker
 	width             int
@@ -121,6 +129,7 @@ type Model struct {
 	pendingDMLMsg     string
 	confirmClearEdits bool
 	currentScript     string
+	claudeClient      *claude.Client
 }
 
 // NewModel creates the root app model.
@@ -144,6 +153,12 @@ func NewModel(database *db.DB, tables []string, databases []string) Model {
 	statusbar := ui.NewStatusBarModel()
 	statusbar.SetActivePane(0)
 	scriptsModal := ui.NewScriptsModalModel()
+	claudeModal := ui.NewClaudeModalModel()
+
+	var claudeClient *claude.Client
+	if apiKey := env.Get("ANTHROPIC_API_KEY"); apiKey != "" {
+		claudeClient = claude.NewClient(apiKey)
+	}
 
 	return Model{
 		activePane:   SidebarPane,
@@ -152,8 +167,10 @@ func NewModel(database *db.DB, tables []string, databases []string) Model {
 		results:      results,
 		statusbar:    statusbar,
 		scriptsModal: scriptsModal,
+		claudeModal:  claudeModal,
 		db:           database,
 		changes:      changes,
+		claudeClient: claudeClient,
 	}
 }
 
@@ -170,6 +187,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m.recalcLayout()
 		m.scriptsModal.SetSize(msg.Width, msg.Height)
+		m.claudeModal.SetSize(msg.Width, msg.Height)
 		return m, nil
 
 	case tickMsg:
@@ -191,7 +209,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ui.ScriptModalClosedMsg:
 		return m, nil
 
+	case ui.ClaudeModalMsg:
+		return m, m.askClaude(msg.Prompt)
+
+	case ui.ClaudeModalClosedMsg:
+		return m, nil
+
 	case tea.KeyMsg:
+		if m.claudeModal.Visible() {
+			var cmd tea.Cmd
+			m.claudeModal, cmd = m.claudeModal.Update(msg)
+			return m, cmd
+		}
+
 		if m.scriptsModal.Visible() {
 			var cmd tea.Cmd
 			m.scriptsModal, cmd = m.scriptsModal.Update(msg)
@@ -258,6 +288,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "ctrl+o":
 			m.scriptsModal.Open(m.editor.Value())
+			return m, nil
+		case "alt+i":
+			m.statusbar.SetMessage("Alt+I pressed - checking Claude client...", ui.MsgInfo)
+			if m.claudeClient == nil {
+				m.statusbar.SetMessage("Claude API not configured (set ANTHROPIC_API_KEY in .env)", ui.MsgError)
+				return m, nil
+			}
+			if m.activePane == EditorPane {
+				m.statusbar.SetMessage("Opening Claude modal...", ui.MsgInfo)
+				m.claudeModal.Open(m.editor.Value())
+				return m, nil
+			}
+			m.statusbar.SetMessage("Not in editor pane", ui.MsgError)
 			return m, nil
 		}
 
@@ -435,6 +478,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+
+	case claudeResponseMsg:
+		m.claudeModal.SetWaiting(false)
+		if msg.err != nil {
+			m.claudeModal.Close()
+			m.statusbar.SetMessage("Claude error: "+msg.err.Error(), ui.MsgError)
+		} else {
+			m.editor.SetValue(msg.response)
+			m.claudeModal.Close()
+			m.statusbar.SetMessage("Claude response received", ui.MsgSuccess)
+		}
+		return m, nil
 	}
 
 	// Forward to focused pane
@@ -495,12 +550,18 @@ func (m Model) View() string {
 
 	statusView := m.statusbar.View()
 
+	baseView := lipgloss.JoinVertical(lipgloss.Left, topBar, mainArea, statusView)
+
+	if m.claudeModal.Visible() {
+		return m.claudeModal.View()
+	}
+
 	if m.scriptsModal.Visible() {
 		m.scriptsModal.SetSize(m.width, m.height)
 		return m.scriptsModal.View()
 	}
 
-	return lipgloss.JoinVertical(lipgloss.Left, topBar, mainArea, statusView)
+	return baseView
 }
 
 func (m *Model) cycleFocus(forward bool) {
@@ -795,4 +856,40 @@ func extractTableName(sql string) string {
 		}
 	}
 	return ""
+}
+
+func (m *Model) askClaude(prompt string) tea.Cmd {
+	m.claudeModal.SetWaiting(true)
+	originalSQL := m.claudeModal.GetOriginalSQL()
+
+	return func() tea.Msg {
+		context := ""
+		if strings.TrimSpace(originalSQL) != "" {
+			context = fmt.Sprintf("\n\nCurrent SQL:\n```sql\n%s\n```", originalSQL)
+		}
+
+		fullPrompt := fmt.Sprintf("%s%s", prompt, context)
+
+		systemPrompt := fmt.Sprintf(`You are a PostgreSQL expert. The user is working with these tables: %s
+
+CRITICAL: Respond ONLY with SQL code. No explanations, no markdown formatting, no comments unless they are SQL comments.
+- Return ONLY executable PostgreSQL SQL
+- Do NOT use markdown code blocks
+- Do NOT add any text before or after the SQL
+- If fixing SQL, return the corrected version only
+- If generating new SQL, return only the query`, strings.Join(m.sidebar.GetTables(), ", "))
+
+		response, err := m.claudeClient.SendMessage(fullPrompt, systemPrompt)
+		if err != nil {
+			return claudeResponseMsg{err: err}
+		}
+
+		cleaned := strings.TrimSpace(response)
+		cleaned = strings.TrimPrefix(cleaned, "```sql")
+		cleaned = strings.TrimPrefix(cleaned, "```")
+		cleaned = strings.TrimSuffix(cleaned, "```")
+		cleaned = strings.TrimSpace(cleaned)
+
+		return claudeResponseMsg{response: cleaned}
+	}
 }

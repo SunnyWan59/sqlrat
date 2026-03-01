@@ -3,6 +3,19 @@ CLI PSQL client. Why? Cause fuck DBeaver
 
 ## Features
 
+### Claude AI Integration
+
+Ask Claude for SQL help directly in the editor:
+- Press `Alt+I` (Option+I on Mac) in the editor to open the Claude modal
+- Type what you want to do (e.g., "create a users table", "fix this query")
+- Claude sees your current SQL and available tables
+- Press Enter to get pure SQL code back
+- The response replaces your editor content
+- Set your API key in `.env`:
+  ```
+  ANTHROPIC_API_KEY=sk-ant-api03-...
+  ```
+
 ### Copy, Paste, and Visual Selection
 
 **Results Table:**
@@ -35,6 +48,7 @@ CLI PSQL client. Why? Cause fuck DBeaver
 - `Ctrl+Y` - Copy all SQL to clipboard
 - `Ctrl+V` - Paste from clipboard
 - `Ctrl+O` - Open scripts modal
+- `Alt+I` - Ask Claude AI for SQL help (opens modal)
 - `Tab` - Accept autocomplete suggestion
 
 **Results Table:**

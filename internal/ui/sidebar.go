@@ -101,6 +101,11 @@ func (m *SidebarModel) SetActiveDatabase(name string) {
 	m.activeDatabase = name
 }
 
+// GetTables returns the list of tables.
+func (m *SidebarModel) GetTables() []string {
+	return m.tables
+}
+
 // IsSearching returns whether the sidebar is in an input mode (search, copy, or delete confirm).
 func (m SidebarModel) IsSearching() bool {
 	return m.searching || m.copying || m.confirmDelete

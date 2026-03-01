@@ -13,6 +13,7 @@ import (
 	"cli-sql/internal/app"
 	"cli-sql/internal/config"
 	"cli-sql/internal/db"
+	"cli-sql/internal/env"
 	"cli-sql/internal/ui"
 )
 
@@ -601,6 +602,8 @@ func (m connectionModel) tryConnect() tea.Cmd {
 // ---------------------------------------------------------------------------
 
 func main() {
+	env.Load()
+
 	cfg, _ := config.Load()
 
 	var database *db.DB
