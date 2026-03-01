@@ -120,6 +120,7 @@ type Model struct {
 	statusbar         ui.StatusBarModel
 	scriptsModal      ui.ScriptsModalModel
 	claudeModal       ui.ClaudeModalModel
+	chatPanel         ui.ChatPanelModel
 	diffModal         ui.DiffModalModel
 	db                *db.DB
 	changes           *editor.ChangeTracker
@@ -127,6 +128,7 @@ type Model struct {
 	height            int
 	lastSQL           string
 	lastTable         string
+	lastError         string
 	pendingDMLMsg     string
 	confirmClearEdits bool
 	currentScript     string
@@ -155,6 +157,7 @@ func NewModel(database *db.DB, tables []string, databases []string) Model {
 	statusbar.SetActivePane(0)
 	scriptsModal := ui.NewScriptsModalModel()
 	claudeModal := ui.NewClaudeModalModel()
+	chatPanel := ui.NewChatPanelModel()
 	diffModal := ui.NewDiffModalModel()
 
 	var claudeClient *claude.Client
@@ -170,6 +173,7 @@ func NewModel(database *db.DB, tables []string, databases []string) Model {
 		statusbar:    statusbar,
 		scriptsModal: scriptsModal,
 		claudeModal:  claudeModal,
+		chatPanel:    chatPanel,
 		diffModal:    diffModal,
 		db:           database,
 		changes:      changes,
@@ -218,7 +222,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ui.ClaudeModalClosedMsg:
 		return m, nil
 
+	case ui.ChatPanelSendMsg:
+		return m, m.askClaudeChat(msg.Prompt)
+
 	case tea.KeyMsg:
+		if m.chatPanel.Visible() {
+			var cmd tea.Cmd
+			m.chatPanel, cmd = m.chatPanel.Update(msg)
+			return m, cmd
+		}
+
 		if m.claudeModal.Visible() {
 			var cmd tea.Cmd
 			m.claudeModal, cmd = m.claudeModal.Update(msg)
@@ -293,17 +306,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.scriptsModal.Open(m.editor.Value())
 			return m, nil
 		case "alt+i":
-			m.statusbar.SetMessage("Alt+I pressed - checking Claude client...", ui.MsgInfo)
 			if m.claudeClient == nil {
 				m.statusbar.SetMessage("Claude API not configured (set ANTHROPIC_API_KEY in .env)", ui.MsgError)
 				return m, nil
 			}
-			if m.activePane == EditorPane {
-				m.statusbar.SetMessage("Opening Claude modal...", ui.MsgInfo)
-				m.claudeModal.Open(m.editor.Value())
-				return m, nil
-			}
-			m.statusbar.SetMessage("Not in editor pane", ui.MsgError)
+			m.chatPanel.Toggle()
+			m.chatPanel.SetCurrentSQL(m.editor.Value())
 			return m, nil
 		}
 
@@ -423,18 +431,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.results.SetError(msg.err.Error())
 			m.statusbar.SetMessage("Query error: "+msg.err.Error(), ui.MsgError)
+			m.lastError = msg.err.Error()
 		} else if msg.result != nil {
 			m.results.SetData(msg.result.Columns, msg.result.ColumnTypes, msg.result.Rows)
-			// Use extracted table context so free-form SELECTs are still editable
 			m.results.SetTableContext(msg.tableName, msg.pks)
 			if msg.tableName != "" {
 				m.lastTable = msg.tableName
 			}
 			m.statusbar.SetQueryInfo(msg.result.ExecTime, msg.result.RowCount)
 			m.statusbar.SetMessage(fmt.Sprintf("Query returned %d rows", msg.result.RowCount), ui.MsgSuccess)
+			m.lastError = ""
 		} else if msg.execRes != nil {
 			m.statusbar.SetQueryInfo(msg.execRes.ExecTime, int(msg.execRes.RowsAffected))
 			m.statusbar.SetMessage(fmt.Sprintf("%d rows affected", msg.execRes.RowsAffected), ui.MsgSuccess)
+			m.lastError = ""
 
 			if ddlTable := extractDDLTableName(msg.lastSQL); ddlTable != "" {
 				isCreate := isCreateTable(msg.lastSQL)
@@ -457,10 +467,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case commitResultMsg:
 		if msg.err != nil {
 			m.statusbar.SetMessage("Commit failed: "+msg.err.Error(), ui.MsgError)
+			m.lastError = msg.err.Error()
 		} else {
 			m.statusbar.SetMessage(fmt.Sprintf("Committed %d changes", msg.count), ui.MsgSuccess)
 			m.changes.Clear()
-			// Refresh the current table if we were browsing one
+			m.lastError = ""
 			if m.lastTable != "" {
 				return m, m.loadTable(m.lastTable)
 			}
@@ -484,14 +495,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case claudeResponseMsg:
 		m.claudeModal.SetWaiting(false)
+		m.chatPanel.SetWaiting(false)
+
 		if msg.err != nil {
-			m.claudeModal.Close()
+			if m.claudeModal.Visible() {
+				m.claudeModal.Close()
+			}
+			if m.chatPanel.Visible() {
+				m.chatPanel.AddAssistantMessage("Error: " + msg.err.Error())
+			}
 			m.statusbar.SetMessage("Claude error: "+msg.err.Error(), ui.MsgError)
 		} else {
-			m.claudeModal.Close()
-			oldSQL := m.claudeModal.GetOriginalSQL()
-			m.diffModal.Show(oldSQL, msg.response)
-			m.statusbar.SetMessage("Review Claude's suggested changes", ui.MsgSuccess)
+			if m.claudeModal.Visible() {
+				m.claudeModal.Close()
+				oldSQL := m.claudeModal.GetOriginalSQL()
+				m.diffModal.Show(oldSQL, msg.response)
+				m.statusbar.SetMessage("Review Claude's suggested changes", ui.MsgSuccess)
+			} else if m.chatPanel.Visible() {
+				m.chatPanel.AddAssistantMessage(msg.response)
+				oldSQL := m.chatPanel.GetCurrentSQL()
+				m.diffModal.Show(oldSQL, msg.response)
+				m.statusbar.SetMessage("Review Claude's suggested changes", ui.MsgSuccess)
+			}
 		}
 		return m, nil
 
@@ -535,16 +560,34 @@ func (m Model) View() string {
 		return "Loading..."
 	}
 
-	// Top bar
 	topBar := ui.TopBarStyle.Width(m.width - 2).Render(
 		fmt.Sprintf(" %s ", m.db.ConnInfo()),
 	)
 
-	// Layout: sidebar on left, editor+results stacked on right
-	sidebarW := 30
-	rightW := m.width - sidebarW - 1
+	availH := m.height - 3
 
-	availH := m.height - 3 // top bar + status bar + spacing
+	chatPanelW := 0
+	if m.chatPanel.Visible() {
+		chatPanelW = 50
+		if chatPanelW > m.width/3 {
+			chatPanelW = m.width / 3
+		}
+		m.chatPanel.SetSize(chatPanelW, availH)
+	}
+
+	sidebarW := 30
+	remainingW := m.width - chatPanelW - sidebarW - 2
+	if remainingW < 40 {
+		remainingW = 40
+		if chatPanelW > 0 {
+			chatPanelW = m.width - sidebarW - remainingW - 2
+			if chatPanelW < 30 {
+				chatPanelW = 30
+			}
+			m.chatPanel.SetSize(chatPanelW, availH)
+		}
+	}
+
 	if availH < 6 {
 		availH = 6
 	}
@@ -556,16 +599,27 @@ func (m Model) View() string {
 	resultsH := availH - editorH
 
 	m.sidebar.SetSize(sidebarW, availH)
-	m.editor.SetSize(rightW, editorH)
-	m.results.SetSize(rightW, resultsH)
+	m.editor.SetSize(remainingW, editorH)
+	m.results.SetSize(remainingW, resultsH)
 	m.statusbar.SetWidth(m.width)
 
-	sidebarView := m.sidebar.View()
-	editorView := m.editor.View()
-	resultsView := m.results.View()
+	var mainArea string
+	if m.chatPanel.Visible() {
+		chatView := m.chatPanel.View()
+		sidebarView := m.sidebar.View()
+		editorView := m.editor.View()
+		resultsView := m.results.View()
 
-	rightPane := lipgloss.JoinVertical(lipgloss.Left, editorView, resultsView)
-	mainArea := lipgloss.JoinHorizontal(lipgloss.Top, sidebarView, rightPane)
+		rightPane := lipgloss.JoinVertical(lipgloss.Left, editorView, resultsView)
+		mainArea = lipgloss.JoinHorizontal(lipgloss.Top, sidebarView, rightPane, chatView)
+	} else {
+		sidebarView := m.sidebar.View()
+		editorView := m.editor.View()
+		resultsView := m.results.View()
+
+		rightPane := lipgloss.JoinVertical(lipgloss.Left, editorView, resultsView)
+		mainArea = lipgloss.JoinHorizontal(lipgloss.Top, sidebarView, rightPane)
+	}
 
 	statusView := m.statusbar.View()
 
@@ -885,11 +939,57 @@ func extractTableName(sql string) string {
 func (m *Model) askClaude(prompt string) tea.Cmd {
 	m.claudeModal.SetWaiting(true)
 	originalSQL := m.claudeModal.GetOriginalSQL()
+	lastError := m.lastError
 
 	return func() tea.Msg {
 		context := ""
 		if strings.TrimSpace(originalSQL) != "" {
 			context = fmt.Sprintf("\n\nCurrent SQL:\n```sql\n%s\n```", originalSQL)
+		}
+
+		if lastError != "" {
+			context += fmt.Sprintf("\n\nLast Error:\n%s", lastError)
+		}
+
+		fullPrompt := fmt.Sprintf("%s%s", prompt, context)
+
+		systemPrompt := fmt.Sprintf(`You are a PostgreSQL expert. The user is working with these tables: %s
+
+CRITICAL: Respond ONLY with SQL code. No explanations, no markdown formatting, no comments unless they are SQL comments.
+- Return ONLY executable PostgreSQL SQL
+- Do NOT use markdown code blocks
+- Do NOT add any text before or after the SQL
+- If fixing SQL, return the corrected version only
+- If generating new SQL, return only the query`, strings.Join(m.sidebar.GetTables(), ", "))
+
+		response, err := m.claudeClient.SendMessage(fullPrompt, systemPrompt)
+		if err != nil {
+			return claudeResponseMsg{err: err}
+		}
+
+		cleaned := strings.TrimSpace(response)
+		cleaned = strings.TrimPrefix(cleaned, "```sql")
+		cleaned = strings.TrimPrefix(cleaned, "```")
+		cleaned = strings.TrimSuffix(cleaned, "```")
+		cleaned = strings.TrimSpace(cleaned)
+
+		return claudeResponseMsg{response: cleaned}
+	}
+}
+
+func (m *Model) askClaudeChat(prompt string) tea.Cmd {
+	m.chatPanel.SetWaiting(true)
+	currentSQL := m.chatPanel.GetCurrentSQL()
+	lastError := m.lastError
+
+	return func() tea.Msg {
+		context := ""
+		if strings.TrimSpace(currentSQL) != "" {
+			context = fmt.Sprintf("\n\nCurrent SQL:\n```sql\n%s\n```", currentSQL)
+		}
+
+		if lastError != "" {
+			context += fmt.Sprintf("\n\nLast Error:\n%s", lastError)
 		}
 
 		fullPrompt := fmt.Sprintf("%s%s", prompt, context)

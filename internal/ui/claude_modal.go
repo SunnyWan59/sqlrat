@@ -45,6 +45,15 @@ func (m *ClaudeModalModel) Open(currentSQL string) {
 	m.originalSQL = currentSQL
 }
 
+func (m *ClaudeModalModel) OpenWithPrompt(currentSQL string, prompt string) {
+	m.visible = true
+	m.textarea.SetValue(prompt)
+	m.textarea.Focus()
+	m.waiting = false
+	m.response = ""
+	m.originalSQL = currentSQL
+}
+
 func (m *ClaudeModalModel) Close() {
 	m.visible = false
 	m.textarea.Blur()

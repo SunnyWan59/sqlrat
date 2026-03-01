@@ -171,12 +171,12 @@ func (m StatusBarModel) contextHints() string {
 
 	switch m.activePane {
 	case 0: // sidebar
-		return "j/k Navigate | Enter Select | / Search | D Databases | Tab Switch pane"
+		return "j/k Navigate | Enter Select | / Search | D Databases | Alt+I Claude | Tab Switch pane"
 	case 1: // editor
-		return "Ctrl+J Line | Ctrl+E All | Ctrl+O Scripts | Tab Switch pane"
+		return "Ctrl+J Line | Ctrl+E All | Ctrl+O Scripts | Alt+I Claude | Tab Switch pane"
 	case 2: // results
-		return "hjkl Navigate | e Edit | y Copy | p Paste | V Visual | d Delete | a Add"
+		return "hjkl Navigate | e Edit | y Copy | p Paste | V Visual | d Delete | a Add | Alt+I Claude"
 	default:
-		return "Tab Switch pane | Ctrl+C Quit"
+		return "Tab Switch pane | Alt+I Claude | Ctrl+C Quit"
 	}
 }
