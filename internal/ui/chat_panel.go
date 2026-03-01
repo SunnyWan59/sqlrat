@@ -13,21 +13,30 @@ type ChatMessage struct {
 	Role      string
 	Content   string
 	Timestamp time.Time
+	IsDiff    bool
+	OldSQL    string
+	NewSQL    string
 }
 
 type ChatPanelSendMsg struct {
 	Prompt string
 }
 
+type ChatPanelAcceptDiffMsg struct{}
+
+type ChatPanelRejectDiffMsg struct{}
+
 type ChatPanelModel struct {
-	visible      bool
-	messages     []ChatMessage
-	input        textarea.Model
-	width        int
-	height       int
-	scrollOffset int
-	waiting      bool
-	currentSQL   string
+	visible        bool
+	messages       []ChatMessage
+	input          textarea.Model
+	width          int
+	height         int
+	scrollOffset   int
+	waiting        bool
+	currentSQL     string
+	pendingDiffSQL string
+	showingDiff    bool
 }
 
 func NewChatPanelModel() ChatPanelModel {
@@ -91,6 +100,46 @@ func (m *ChatPanelModel) AddAssistantMessage(content string) {
 		Timestamp: time.Now(),
 	})
 	m.scrollToBottom()
+}
+
+func (m *ChatPanelModel) GetConversationHistory() []ChatMessage {
+	var history []ChatMessage
+	for _, msg := range m.messages {
+		if !msg.IsDiff {
+			history = append(history, msg)
+		}
+	}
+	return history
+}
+
+func (m *ChatPanelModel) AddDiffMessage(oldSQL, newSQL string) {
+	m.messages = append(m.messages, ChatMessage{
+		Role:      "assistant",
+		Content:   "I've suggested some changes:",
+		Timestamp: time.Now(),
+		IsDiff:    true,
+		OldSQL:    oldSQL,
+		NewSQL:    newSQL,
+	})
+	m.pendingDiffSQL = newSQL
+	m.showingDiff = true
+	m.scrollToBottom()
+}
+
+func (m *ChatPanelModel) AcceptDiff() string {
+	sql := m.pendingDiffSQL
+	m.pendingDiffSQL = ""
+	m.showingDiff = false
+	return sql
+}
+
+func (m *ChatPanelModel) RejectDiff() {
+	m.pendingDiffSQL = ""
+	m.showingDiff = false
+}
+
+func (m *ChatPanelModel) HasPendingDiff() bool {
+	return m.showingDiff
 }
 
 func (m *ChatPanelModel) SetWaiting(waiting bool) {
@@ -163,7 +212,24 @@ func (m ChatPanelModel) Update(msg tea.Msg) (ChatPanelModel, tea.Cmd) {
 		case "ctrl+c":
 			return m, tea.Quit
 
+		case "y":
+			if m.showingDiff {
+				return m, func() tea.Msg {
+					return ChatPanelAcceptDiffMsg{}
+				}
+			}
+
+		case "n":
+			if m.showingDiff {
+				m.RejectDiff()
+				return m, nil
+			}
+
 		case "esc":
+			if m.showingDiff {
+				m.RejectDiff()
+				return m, nil
+			}
 			if m.input.Value() == "" {
 				m.Hide()
 				return m, nil
@@ -172,6 +238,11 @@ func (m ChatPanelModel) Update(msg tea.Msg) (ChatPanelModel, tea.Cmd) {
 			return m, nil
 
 		case "enter":
+			if m.showingDiff {
+				return m, func() tea.Msg {
+					return ChatPanelAcceptDiffMsg{}
+				}
+			}
 			if !msg.Alt {
 				prompt := strings.TrimSpace(m.input.Value())
 				if prompt != "" {
@@ -224,9 +295,11 @@ func (m ChatPanelModel) Update(msg tea.Msg) (ChatPanelModel, tea.Cmd) {
 			}
 		}
 
-		var cmd tea.Cmd
-		m.input, cmd = m.input.Update(msg)
-		return m, cmd
+		if !m.showingDiff {
+			var cmd tea.Cmd
+			m.input, cmd = m.input.Update(msg)
+			return m, cmd
+		}
 	}
 
 	return m, nil
@@ -283,9 +356,18 @@ func (m ChatPanelModel) View() string {
 		headerLine := DimText.Render(prefix + " " + timestamp)
 		messagesView.WriteString(headerLine + "\n")
 
-		content := strings.TrimSpace(msg.Content)
-		wrapped := wrapText(content, m.width-4)
-		messagesView.WriteString(msgStyle.Render(wrapped) + "\n\n")
+		if msg.IsDiff {
+			content := strings.TrimSpace(msg.Content)
+			messagesView.WriteString(msgStyle.Render(content) + "\n\n")
+
+			diffs := ComputeDiff(msg.OldSQL, msg.NewSQL)
+			diffContent := RenderDiff(diffs, m.width-8)
+			messagesView.WriteString(diffContent + "\n\n")
+		} else {
+			content := strings.TrimSpace(msg.Content)
+			wrapped := wrapText(content, m.width-4)
+			messagesView.WriteString(msgStyle.Render(wrapped) + "\n\n")
+		}
 	}
 
 	if m.waiting {
@@ -299,6 +381,10 @@ func (m ChatPanelModel) View() string {
 
 	inputLabel := DimText.Render("Message:")
 	inputHelp := DimText.Render("Enter to send | Alt+Enter for newline | Esc to close")
+
+	if m.showingDiff {
+		inputHelp = DimText.Render("y/Enter to accept | n/Esc to reject")
+	}
 
 	contentHeight := m.height - 12
 	if contentHeight < 5 {

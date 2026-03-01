@@ -512,12 +512,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.diffModal.Show(oldSQL, msg.response)
 				m.statusbar.SetMessage("Review Claude's suggested changes", ui.MsgSuccess)
 			} else if m.chatPanel.Visible() {
-				m.chatPanel.AddAssistantMessage(msg.response)
 				oldSQL := m.chatPanel.GetCurrentSQL()
-				m.diffModal.Show(oldSQL, msg.response)
-				m.statusbar.SetMessage("Review Claude's suggested changes", ui.MsgSuccess)
+				m.chatPanel.AddDiffMessage(oldSQL, msg.response)
+				m.statusbar.SetMessage("Review changes (y to accept, n to reject)", ui.MsgSuccess)
 			}
 		}
+		return m, nil
+
+	case ui.ChatPanelAcceptDiffMsg:
+		newSQL := m.chatPanel.AcceptDiff()
+		m.editor.SetValue(newSQL)
+		m.statusbar.SetMessage("Changes applied", ui.MsgSuccess)
 		return m, nil
 
 	case ui.DiffModalAcceptedMsg:
@@ -981,18 +986,38 @@ func (m *Model) askClaudeChat(prompt string) tea.Cmd {
 	m.chatPanel.SetWaiting(true)
 	currentSQL := m.chatPanel.GetCurrentSQL()
 	lastError := m.lastError
+	conversationHistory := m.chatPanel.GetConversationHistory()
 
 	return func() tea.Msg {
+		var messages []claude.Message
+
 		context := ""
 		if strings.TrimSpace(currentSQL) != "" {
-			context = fmt.Sprintf("\n\nCurrent SQL:\n```sql\n%s\n```", currentSQL)
+			context += fmt.Sprintf("Current SQL in editor:\n```sql\n%s\n```\n\n", currentSQL)
 		}
 
 		if lastError != "" {
-			context += fmt.Sprintf("\n\nLast Error:\n%s", lastError)
+			context += fmt.Sprintf("Recent error:\n%s\n\n", lastError)
 		}
 
-		fullPrompt := fmt.Sprintf("%s%s", prompt, context)
+		if len(conversationHistory) > 0 {
+			for _, msg := range conversationHistory {
+				messages = append(messages, claude.Message{
+					Role:    msg.Role,
+					Content: msg.Content,
+				})
+			}
+		}
+
+		userMessage := prompt
+		if context != "" {
+			userMessage = context + prompt
+		}
+
+		messages = append(messages, claude.Message{
+			Role:    "user",
+			Content: userMessage,
+		})
 
 		systemPrompt := fmt.Sprintf(`You are a PostgreSQL expert. The user is working with these tables: %s
 
@@ -1001,9 +1026,18 @@ CRITICAL: Respond ONLY with SQL code. No explanations, no markdown formatting, n
 - Do NOT use markdown code blocks
 - Do NOT add any text before or after the SQL
 - If fixing SQL, return the corrected version only
-- If generating new SQL, return only the query`, strings.Join(m.sidebar.GetTables(), ", "))
+- If generating new SQL, return only the query
+- The user will show you their current SQL and any errors they're experiencing`, strings.Join(m.sidebar.GetTables(), ", "))
 
-		response, err := m.claudeClient.SendMessage(fullPrompt, systemPrompt)
+		var response string
+		var err error
+
+		if len(messages) == 1 {
+			response, err = m.claudeClient.SendMessage(userMessage, systemPrompt)
+		} else {
+			response, err = m.claudeClient.SendConversation(messages, systemPrompt)
+		}
+
 		if err != nil {
 			return claudeResponseMsg{err: err}
 		}
