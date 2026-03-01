@@ -449,6 +449,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.results, cmd = m.results.Update(msg)
 		m.statusbar.SetEditMode(m.results.IsEditing())
 		m.statusbar.SetSearchMode(m.results.IsSearching())
+		m.statusbar.SetVisualMode(m.results.IsVisualMode())
 	}
 
 	return m, cmd

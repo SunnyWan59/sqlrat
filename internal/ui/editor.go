@@ -5,6 +5,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -35,6 +36,9 @@ type EditorModel struct {
 	ghostMatches    []ghostCandidate
 	ghostIndex      int
 	tableNames      []string
+	visualMode      bool
+	visualStart     int
+	visualEnd       int
 }
 
 // SetTableNames updates the list of table names used for autocomplete.
@@ -107,6 +111,16 @@ func (m EditorModel) Update(msg tea.Msg) (EditorModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
+		case "ctrl+y":
+			text := m.textarea.Value()
+			clipboard.WriteAll(text)
+			return m, nil
+		case "ctrl+v":
+			if clipText, err := clipboard.ReadAll(); err == nil && clipText != "" {
+				m.textarea.InsertString(clipText)
+				m.updateGhost()
+			}
+			return m, nil
 		case "ctrl+j":
 			sql := m.statementAtCursor()
 			if sql == "" {
@@ -337,7 +351,7 @@ func (m EditorModel) View() string {
 	}
 
 	titleLeft := HeaderStyle.Render("SQL Editor")
-	titleRight := DimText.Render("Ctrl+J line | Ctrl+E all | Ctrl+O scripts")
+	titleRight := DimText.Render("Ctrl+Y copy | Ctrl+V paste | Ctrl+J run | Ctrl+E all | Ctrl+O scripts")
 	gap := innerW - lipgloss.Width(titleLeft) - lipgloss.Width(titleRight)
 	if gap < 1 {
 		gap = 1

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -46,6 +47,10 @@ type ResultsModel struct {
 	previewScroll   int
 	previewEditing  bool
 	previewTextarea textarea.Model
+	clipboard       string
+	visualMode      bool
+	visualStartRow  int
+	visualStartCol  int
 }
 
 // NewResultsModel creates a new results model.
@@ -163,6 +168,11 @@ func (m ResultsModel) IsPreviewing() bool {
 	return m.previewing
 }
 
+// IsVisualMode returns whether we're in visual selection mode.
+func (m ResultsModel) IsVisualMode() bool {
+	return m.visualMode
+}
+
 func (m *ResultsModel) applyRowFilter() {
 	if m.searchQuery == "" {
 		m.filteredIndices = nil
@@ -250,21 +260,50 @@ func (m ResultsModel) updateNavMode(msg tea.KeyMsg) (ResultsModel, tea.Cmd) {
 		if m.cursorRow > 0 {
 			m.cursorRow--
 			m.ensureRowVisible()
+			if m.visualMode {
+				m.cursorCol = m.visualStartCol
+			}
 		}
 	case "down", "j":
 		if m.cursorRow < len(m.rows)-1 {
 			m.cursorRow++
 			m.ensureRowVisible()
+			if m.visualMode {
+				m.cursorCol = m.visualStartCol
+			}
 		}
 	case "left", "h":
 		if m.cursorCol > 0 {
 			m.cursorCol--
 			m.ensureColVisible()
+			if m.visualMode {
+				m.cursorRow = m.visualStartRow
+			}
 		}
 	case "right", "l":
 		if m.cursorCol < len(m.columns)-1 {
 			m.cursorCol++
 			m.ensureColVisible()
+			if m.visualMode {
+				m.cursorRow = m.visualStartRow
+			}
+		}
+	case "V":
+		m.visualMode = !m.visualMode
+		if m.visualMode {
+			m.visualStartRow = m.cursorRow
+			m.visualStartCol = m.cursorCol
+		}
+	case "y":
+		if m.visualMode {
+			m.copySelection()
+			m.visualMode = false
+		} else if len(m.rows) > 0 && len(m.columns) > 0 {
+			m.copyCellToClipboard()
+		}
+	case "p":
+		if len(m.rows) > 0 && len(m.columns) > 0 {
+			return m.pasteFromClipboard(), nil
 		}
 	case "e":
 		if len(m.primaryKeys) == 0 && !m.isInsertedRow(m.cursorRow) {
@@ -313,7 +352,6 @@ func (m ResultsModel) updateNavMode(msg tea.KeyMsg) (ResultsModel, tea.Cmd) {
 			m.cursorRow = len(m.rows) - 1
 			m.cursorCol = 0
 			m.ensureRowVisible()
-			// Enter edit mode on first cell
 			m.editing = true
 			m.editValue = ""
 		}
@@ -391,6 +429,10 @@ func (m ResultsModel) updateNavMode(msg tea.KeyMsg) (ResultsModel, tea.Cmd) {
 			ta.SetWidth(pw)
 			ta.SetHeight(ph)
 			m.previewTextarea = ta
+		}
+	case "esc":
+		if m.visualMode {
+			m.visualMode = false
 		}
 	}
 	return m, nil
@@ -590,6 +632,10 @@ func (m ResultsModel) moveToEditCell(col int) ResultsModel {
 
 func (m ResultsModel) updateEditMode(msg tea.KeyMsg) (ResultsModel, tea.Cmd) {
 	switch msg.String() {
+	case "ctrl+v":
+		if clipboardText, err := clipboard.ReadAll(); err == nil {
+			m.editValue += clipboardText
+		}
 	case "enter", "tab":
 		m = m.commitCurrentCell()
 		if m.cursorCol < len(m.columns)-1 {
@@ -826,11 +872,9 @@ func (m ResultsModel) renderTable(w, h int) string {
 
 			var style lipgloss.Style
 
-			// Determine cell style
 			isCursor := ri == m.cursorRow && ci == m.cursorCol && m.focused
 
 			if m.editing && isCursor {
-				// Show edit buffer with cursor
 				editDisp := m.editValue + "█"
 				truncEdit := truncate(editDisp, colW)
 				style = CellEditing
@@ -849,10 +893,13 @@ func (m ResultsModel) renderTable(w, h int) string {
 			}
 
 			isMatch := len(m.filteredIndices) > 0 && m.isMatchRow(ri)
+			isVisualSelection := m.visualMode && m.isInVisualSelection(ri, ci)
 
 			switch {
 			case isCursor:
 				style = CellSelected
+			case isVisualSelection:
+				style = lipgloss.NewStyle().Background(lipgloss.Color("#444444")).Foreground(lipgloss.Color("#ffffff"))
 			case isDeleted:
 				style = DeletedText
 			case isInserted:
@@ -920,4 +967,150 @@ func truncate(s string, maxLen int) string {
 		return s[:maxLen]
 	}
 	return s[:maxLen-3] + "..."
+}
+
+func (m *ResultsModel) copyCellToClipboard() {
+	val := m.displayValue(m.cursorRow, m.cursorCol)
+	if val == "<NULL>" {
+		val = ""
+	}
+	m.clipboard = val
+	clipboard.WriteAll(val)
+}
+
+func (m *ResultsModel) copySelection() {
+	startRow := min(m.visualStartRow, m.cursorRow)
+	endRow := max(m.visualStartRow, m.cursorRow)
+	startCol := min(m.visualStartCol, m.cursorCol)
+	endCol := max(m.visualStartCol, m.cursorCol)
+
+	var b strings.Builder
+
+	if startRow == endRow && startCol == endCol {
+		val := m.displayValue(startRow, startCol)
+		if val == "<NULL>" {
+			val = ""
+		}
+		b.WriteString(val)
+	} else if startRow == endRow {
+		for col := startCol; col <= endCol; col++ {
+			if col > startCol {
+				b.WriteString("\t")
+			}
+			val := m.displayValue(startRow, col)
+			if val == "<NULL>" {
+				val = ""
+			}
+			b.WriteString(val)
+		}
+	} else if startCol == endCol {
+		for row := startRow; row <= endRow; row++ {
+			if row > startRow {
+				b.WriteString("\n")
+			}
+			val := m.displayValue(row, startCol)
+			if val == "<NULL>" {
+				val = ""
+			}
+			b.WriteString(val)
+		}
+	} else {
+		for row := startRow; row <= endRow; row++ {
+			if row > startRow {
+				b.WriteString("\n")
+			}
+			for col := startCol; col <= endCol; col++ {
+				if col > startCol {
+					b.WriteString("\t")
+				}
+				val := m.displayValue(row, col)
+				if val == "<NULL>" {
+					val = ""
+				}
+				b.WriteString(val)
+			}
+		}
+	}
+
+	content := b.String()
+	m.clipboard = content
+	clipboard.WriteAll(content)
+}
+
+func (m ResultsModel) pasteFromClipboard() ResultsModel {
+	clipText, err := clipboard.ReadAll()
+	if err != nil || clipText == "" {
+		clipText = m.clipboard
+	}
+	if clipText == "" {
+		return m
+	}
+
+	if len(m.primaryKeys) == 0 && !m.isInsertedRow(m.cursorRow) {
+		return m
+	}
+
+	lines := strings.Split(clipText, "\n")
+	startRow := m.cursorRow
+	startCol := m.cursorCol
+
+	for ri, line := range lines {
+		rowIdx := startRow + ri
+		if rowIdx >= len(m.rows) {
+			break
+		}
+
+		values := strings.Split(line, "\t")
+		for ci, value := range values {
+			colIdx := startCol + ci
+			if colIdx >= len(m.columns) {
+				break
+			}
+
+			if value == "" {
+				value = "<NULL>"
+			}
+
+			if m.isInsertedRow(rowIdx) {
+				m.rows[rowIdx][colIdx] = value
+			} else {
+				pkVals := m.pkValues(rowIdx)
+				m.changes.StageEdit(editor.CellEdit{
+					TableName:   m.tableName,
+					ColumnName:  m.columns[colIdx],
+					RowPKValues: pkVals,
+					OldValue:    m.rows[rowIdx][colIdx],
+					NewValue:    value,
+				})
+			}
+		}
+	}
+
+	return m
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func (m ResultsModel) isInVisualSelection(row, col int) bool {
+	if !m.visualMode {
+		return false
+	}
+	startRow := min(m.visualStartRow, m.cursorRow)
+	endRow := max(m.visualStartRow, m.cursorRow)
+	startCol := min(m.visualStartCol, m.cursorCol)
+	endCol := max(m.visualStartCol, m.cursorCol)
+
+	return row >= startRow && row <= endRow && col >= startCol && col <= endCol
 }

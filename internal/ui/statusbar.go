@@ -28,6 +28,7 @@ type StatusBarModel struct {
 	activePane     int
 	editMode       bool
 	searchMode     bool
+	visualMode     bool
 	queryTime      time.Duration
 	rowCount       int
 	width          int
@@ -71,6 +72,11 @@ func (m *StatusBarModel) SetEditMode(editing bool) {
 // SetSearchMode sets whether any pane is in search mode.
 func (m *StatusBarModel) SetSearchMode(searching bool) {
 	m.searchMode = searching
+}
+
+// SetVisualMode sets whether results table is in visual selection mode.
+func (m *StatusBarModel) SetVisualMode(visual bool) {
+	m.visualMode = visual
 }
 
 // SetQueryInfo updates the last query stats.
@@ -152,11 +158,15 @@ func (m StatusBarModel) View() string {
 
 func (m StatusBarModel) contextHints() string {
 	if m.editMode {
-		return "Type to edit | Tab/Enter Next col | Shift+Tab Prev col | Esc Cancel"
+		return "Type to edit | Ctrl+V Paste | Tab/Enter Next col | Shift+Tab Prev col | Esc Cancel"
 	}
 
 	if m.searchMode {
 		return "Type to filter | Enter Confirm | Esc Cancel"
+	}
+
+	if m.visualMode {
+		return "hjkl Expand selection | y Copy | Esc Exit visual | V Toggle visual"
 	}
 
 	switch m.activePane {
@@ -165,7 +175,7 @@ func (m StatusBarModel) contextHints() string {
 	case 1: // editor
 		return "Ctrl+J Line | Ctrl+E All | Ctrl+O Scripts | Tab Switch pane"
 	case 2: // results
-		return "hjkl Navigate | e Edit | d Delete | a Add | / Search | n/N Next/Prev match"
+		return "hjkl Navigate | e Edit | y Copy | p Paste | V Visual | d Delete | a Add"
 	default:
 		return "Tab Switch pane | Ctrl+C Quit"
 	}
