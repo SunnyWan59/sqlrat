@@ -120,6 +120,7 @@ type Model struct {
 	statusbar         ui.StatusBarModel
 	scriptsModal      ui.ScriptsModalModel
 	claudeModal       ui.ClaudeModalModel
+	diffModal         ui.DiffModalModel
 	db                *db.DB
 	changes           *editor.ChangeTracker
 	width             int
@@ -154,6 +155,7 @@ func NewModel(database *db.DB, tables []string, databases []string) Model {
 	statusbar.SetActivePane(0)
 	scriptsModal := ui.NewScriptsModalModel()
 	claudeModal := ui.NewClaudeModalModel()
+	diffModal := ui.NewDiffModalModel()
 
 	var claudeClient *claude.Client
 	if apiKey := env.Get("ANTHROPIC_API_KEY"); apiKey != "" {
@@ -168,6 +170,7 @@ func NewModel(database *db.DB, tables []string, databases []string) Model {
 		statusbar:    statusbar,
 		scriptsModal: scriptsModal,
 		claudeModal:  claudeModal,
+		diffModal:    diffModal,
 		db:           database,
 		changes:      changes,
 		claudeClient: claudeClient,
@@ -485,15 +488,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.claudeModal.Close()
 			m.statusbar.SetMessage("Claude error: "+msg.err.Error(), ui.MsgError)
 		} else {
-			m.editor.SetValue(msg.response)
 			m.claudeModal.Close()
-			m.statusbar.SetMessage("Claude response received", ui.MsgSuccess)
+			oldSQL := m.claudeModal.GetOriginalSQL()
+			m.diffModal.Show(oldSQL, msg.response)
+			m.statusbar.SetMessage("Review Claude's suggested changes", ui.MsgSuccess)
 		}
+		return m, nil
+
+	case ui.DiffModalAcceptedMsg:
+		m.editor.SetValue(msg.NewSQL)
+		m.statusbar.SetMessage("Changes applied", ui.MsgSuccess)
+		return m, nil
+
+	case ui.DiffModalRejectedMsg:
+		m.statusbar.SetMessage("Changes rejected", ui.MsgError)
 		return m, nil
 	}
 
-	// Forward to focused pane
+	// Handle diff modal first
 	var cmd tea.Cmd
+	if m.diffModal.Visible() {
+		m.diffModal, cmd = m.diffModal.Update(msg)
+		return m, cmd
+	}
+
+	// Forward to focused pane
 	switch m.activePane {
 	case SidebarPane:
 		m.sidebar, cmd = m.sidebar.Update(msg)
@@ -551,6 +570,11 @@ func (m Model) View() string {
 	statusView := m.statusbar.View()
 
 	baseView := lipgloss.JoinVertical(lipgloss.Left, topBar, mainArea, statusView)
+
+	if m.diffModal.Visible() {
+		m.diffModal.SetSize(m.width, m.height)
+		return m.diffModal.View()
+	}
 
 	if m.claudeModal.Visible() {
 		return m.claudeModal.View()
