@@ -324,13 +324,18 @@ func HighlightSQL(sql string) string {
 	overlapping := make([]bool, len(tokens))
 	for i := 0; i < len(tokens); i++ {
 		for j := i + 1; j < len(tokens); j++ {
-			if intervals[i].Start < intervals[j].End && intervals[j].Start < intervals[i].End {
-				if intervals[j].Start < intervals[i].Start ||
-					(intervals[j].Start == intervals[i].Start && intervals[j].End > intervals[i].End) {
-					overlapping[i] = true
-				} else {
-					overlapping[j] = true
-				}
+			hasOverlap := intervals[i].Start < intervals[j].End && intervals[j].Start < intervals[i].End
+			if !hasOverlap {
+				continue
+			}
+
+			jHasPriority := intervals[j].Start < intervals[i].Start ||
+				(intervals[j].Start == intervals[i].Start && intervals[j].End > intervals[i].End)
+
+			if jHasPriority {
+				overlapping[i] = true
+			} else {
+				overlapping[j] = true
 			}
 		}
 	}
