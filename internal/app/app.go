@@ -9,12 +9,12 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"cli-sql/internal/claude"
-	"cli-sql/internal/config"
-	"cli-sql/internal/db"
-	"cli-sql/internal/editor"
-	"cli-sql/internal/env"
-	"cli-sql/internal/ui"
+	"github.com/SunnyWan59/sqlrat/internal/claude"
+	"github.com/SunnyWan59/sqlrat/internal/config"
+	"github.com/SunnyWan59/sqlrat/internal/db"
+	"github.com/SunnyWan59/sqlrat/internal/editor"
+	"github.com/SunnyWan59/sqlrat/internal/env"
+	"github.com/SunnyWan59/sqlrat/internal/ui"
 )
 
 // Pane represents which pane is focused.
