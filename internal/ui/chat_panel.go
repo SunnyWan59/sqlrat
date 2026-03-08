@@ -159,18 +159,66 @@ func (m *ChatPanelModel) scrollToBottom() {
 }
 
 func (m *ChatPanelModel) maxScrollOffset() int {
-	totalLines := 0
+	var messagesView strings.Builder
+	
 	for _, msg := range m.messages {
-		lines := strings.Count(msg.Content, "\n") + 3
-		totalLines += lines
+		var msgStyle lipgloss.Style
+		var prefix string
+
+		if msg.Role == "user" {
+			msgStyle = lipgloss.NewStyle().
+				Foreground(ColorAccent).
+				Padding(0, 1)
+			prefix = "You:"
+		} else {
+			msgStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#cccccc")).
+				Padding(0, 1)
+			prefix = "Claude:"
+		}
+
+		timestamp := msg.Timestamp.Format("15:04")
+		headerLine := DimText.Render(prefix + " " + timestamp)
+		messagesView.WriteString(headerLine + "\n")
+
+		if msg.IsDiff {
+			content := strings.TrimSpace(msg.Content)
+			messagesView.WriteString(msgStyle.Render(content) + "\n\n")
+
+			diffs := ComputeDiff(msg.OldSQL, msg.NewSQL)
+			diffContent := RenderDiff(diffs, m.width-8)
+			messagesView.WriteString(diffContent + "\n\n")
+		} else {
+			content := strings.TrimSpace(msg.Content)
+			wrapped := wrapText(content, m.width-4)
+			messagesView.WriteString(msgStyle.Render(wrapped) + "\n\n")
+		}
+	}
+	
+	if m.waiting {
+		messagesView.WriteString(DimText.Render("Claude is typing...") + "\n\n")
+	}
+	
+	allMessages := messagesView.String()
+	totalLines := len(strings.Split(allMessages, "\n"))
+	
+	sqlBoxHeight := 10
+	if m.currentSQL != "" {
+		sqlLines := strings.Split(m.currentSQL, "\n")
+		if len(sqlLines) > 8 {
+			sqlBoxHeight = 10
+		} else {
+			sqlBoxHeight = len(sqlLines) + 4
+		}
+	}
+	
+	fixedElementsHeight := 15 + sqlBoxHeight
+	contentHeight := m.height - fixedElementsHeight
+	if contentHeight < 5 {
+		contentHeight = 5
 	}
 
-	availHeight := m.height - 8
-	if availHeight < 10 {
-		availHeight = 10
-	}
-
-	maxScroll := totalLines - availHeight
+	maxScroll := totalLines - contentHeight
 	if maxScroll < 0 {
 		maxScroll = 0
 	}
@@ -315,28 +363,37 @@ func (m ChatPanelModel) View() string {
 		Bold(true).
 		Padding(0, 1)
 
-	header := headerStyle.Render("Claude Chat")
+	header := headerStyle.Render("💬 Claude Chat")
+
+	contextHeader := lipgloss.NewStyle().
+		Foreground(ColorModified).
+		Bold(true).
+		Render("Current SQL:")
+
+	sqlBoxStyle := lipgloss.NewStyle().
+		Border(lipgloss.NormalBorder()).
+		BorderForeground(ColorDim).
+		Padding(0, 1).
+		Width(m.width - 6)
+
+	currentSQLDisplay := strings.TrimSpace(m.currentSQL)
+	if currentSQLDisplay == "" {
+		currentSQLDisplay = DimText.Render("(no SQL in editor)")
+	} else {
+		sqlLines := strings.Split(currentSQLDisplay, "\n")
+		maxLines := 8
+		if len(sqlLines) > maxLines {
+			currentSQLDisplay = strings.Join(sqlLines[:maxLines], "\n") + "\n" + DimText.Render("... (truncated)")
+		}
+	}
+	sqlBox := sqlBoxStyle.Render(currentSQLDisplay)
+
+	divider := strings.Repeat("─", m.width-4)
+	dividerLine := DimText.Render(divider)
 
 	var messagesView strings.Builder
 
-	visibleMessages := m.messages
-	if len(m.messages) > 0 {
-		startIdx := 0
-		currentLine := 0
-		for i, msg := range m.messages {
-			msgLines := strings.Count(msg.Content, "\n") + 3
-			if currentLine >= m.scrollOffset {
-				startIdx = i
-				break
-			}
-			currentLine += msgLines
-		}
-		if startIdx < len(m.messages) {
-			visibleMessages = m.messages[startIdx:]
-		}
-	}
-
-	for _, msg := range visibleMessages {
+	for _, msg := range m.messages {
 		var msgStyle lipgloss.Style
 		var prefix string
 
@@ -386,19 +443,43 @@ func (m ChatPanelModel) View() string {
 		inputHelp = DimText.Render("y/Enter to accept | n/Esc to reject")
 	}
 
-	contentHeight := m.height - 12
+	sqlBoxHeight := lipgloss.Height(sqlBox)
+	
+	fixedElementsHeight := 15 + sqlBoxHeight
+	contentHeight := m.height - fixedElementsHeight
 	if contentHeight < 5 {
 		contentHeight = 5
 	}
 
+	allMessages := messagesView.String()
+	allMessageLines := strings.Split(allMessages, "\n")
+	
+	startLine := m.scrollOffset
+	endLine := m.scrollOffset + contentHeight
+	if endLine > len(allMessageLines) {
+		endLine = len(allMessageLines)
+	}
+	if startLine > len(allMessageLines) {
+		startLine = len(allMessageLines)
+	}
+	if startLine < 0 {
+		startLine = 0
+	}
+	
+	visibleContent := strings.Join(allMessageLines[startLine:endLine], "\n")
+
 	messagesBox := lipgloss.NewStyle().
 		Height(contentHeight).
 		Width(m.width - 4).
-		Render(messagesView.String())
+		Render(visibleContent)
 
 	content := lipgloss.JoinVertical(
 		lipgloss.Left,
 		header,
+		"",
+		contextHeader,
+		sqlBox,
+		dividerLine,
 		"",
 		messagesBox,
 		scrollHint,
