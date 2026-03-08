@@ -1,6 +1,20 @@
 # SQL Rat
 CLI PSQL client. Why? Cause fuck DBeaver
 
+## Installation
+
+```bash
+go install github.com/wansunny/sqlrat@latest
+```
+
+Or build from source:
+
+```bash
+git clone https://github.com/wansunny/sqlrat.git
+cd sqlrat
+go build -o sqlrat
+```
+
 ## Features
 
 ### Claude AI Integration

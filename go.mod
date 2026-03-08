@@ -1,4 +1,4 @@
-module cli-sql
+module github.com/wansunny/sqlrat
 
 go 1.24.2
 

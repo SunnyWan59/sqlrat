@@ -9,7 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"cli-sql/internal/editor"
+	"github.com/wansunny/sqlrat/internal/editor"
 )
 
 // EditBlockedMsg is sent when editing is not possible.

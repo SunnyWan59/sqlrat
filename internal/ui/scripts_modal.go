@@ -7,7 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"cli-sql/internal/config"
+	"github.com/wansunny/sqlrat/internal/config"
 )
 
 type ScriptLoadedMsg struct {
