@@ -1,4 +1,4 @@
-module github.com/wansunny/sqlrat
+module github.com/SunnyWan59/sqlrat
 
 go 1.24.2
 

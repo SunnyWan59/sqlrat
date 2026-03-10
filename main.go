@@ -10,11 +10,11 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/wansunny/sqlrat/internal/app"
-	"github.com/wansunny/sqlrat/internal/config"
-	"github.com/wansunny/sqlrat/internal/db"
-	"github.com/wansunny/sqlrat/internal/env"
-	"github.com/wansunny/sqlrat/internal/ui"
+	"github.com/SunnyWan59/sqlrat/internal/app"
+	"github.com/SunnyWan59/sqlrat/internal/config"
+	"github.com/SunnyWan59/sqlrat/internal/db"
+	"github.com/SunnyWan59/sqlrat/internal/env"
+	"github.com/SunnyWan59/sqlrat/internal/ui"
 )
 
 // ---------------------------------------------------------------------------

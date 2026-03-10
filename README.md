@@ -4,13 +4,13 @@ CLI PSQL client. Why? Cause fuck DBeaver
 ## Installation
 
 ```bash
-go install github.com/wansunny/sqlrat@latest
+go install github.com/SunnyWan59/sqlrat@latest
 ```
 
 Or build from source:
 
 ```bash
-git clone https://github.com/wansunny/sqlrat.git
+git clone https://github.com/SunnyWan59/sqlrat.git
 cd sqlrat
 go build -o sqlrat
 ```
