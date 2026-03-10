@@ -37,8 +37,8 @@ type EditorModel struct {
 	ghostIndex      int
 	tableNames      []string
 	visualMode      bool
-	visualStart     int
-	visualEnd       int
+	visualStartRow  int
+	visualStartCol  int
 }
 
 // SetTableNames updates the list of table names used for autocomplete.
@@ -67,6 +67,7 @@ func (m *EditorModel) SetFocused(f bool) {
 		m.textarea.Focus()
 	} else {
 		m.textarea.Blur()
+		m.visualMode = false
 	}
 }
 
@@ -110,7 +111,28 @@ func (m EditorModel) Update(msg tea.Msg) (EditorModel, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if msg.Type == tea.KeyRunes && len(msg.Runes) > 0 && m.visualMode {
+			m.visualMode = false
+		}
 		switch msg.String() {
+		case "shift+up", "shift+down", "shift+left", "shift+right", "shift+home", "shift+end":
+			m.handleShiftArrow(msg)
+			movementKey := shiftToMovementKey(msg)
+			var cmd tea.Cmd
+			m.textarea, cmd = m.textarea.Update(movementKey)
+			m.updateGhost()
+			return m, cmd
+		case "ctrl+c":
+			if m.visualMode {
+				m.copySelection()
+				m.visualMode = false
+			}
+			return m, nil
+		case "esc":
+			if m.visualMode {
+				m.visualMode = false
+				return m, nil
+			}
 		case "ctrl+y":
 			text := m.textarea.Value()
 			clipboard.WriteAll(text)
@@ -203,6 +225,81 @@ func (m *EditorModel) clearGhost() {
 	m.ghostPartialLen = 0
 	m.ghostMatches = nil
 	m.ghostIndex = 0
+}
+
+func (m *EditorModel) handleShiftArrow(msg tea.KeyMsg) {
+	if !m.visualMode {
+		m.visualMode = true
+		m.visualStartRow = m.textarea.Line()
+		m.visualStartCol = m.textarea.LineInfo().ColumnOffset
+	}
+}
+
+func shiftToMovementKey(msg tea.KeyMsg) tea.KeyMsg {
+	switch msg.String() {
+	case "shift+up":
+		return tea.KeyMsg{Type: tea.KeyUp}
+	case "shift+down":
+		return tea.KeyMsg{Type: tea.KeyDown}
+	case "shift+left":
+		return tea.KeyMsg{Type: tea.KeyLeft}
+	case "shift+right":
+		return tea.KeyMsg{Type: tea.KeyRight}
+	case "shift+home":
+		return tea.KeyMsg{Type: tea.KeyHome}
+	case "shift+end":
+		return tea.KeyMsg{Type: tea.KeyEnd}
+	default:
+		return msg
+	}
+}
+
+func (m *EditorModel) copySelection() {
+	lines := strings.Split(m.textarea.Value(), "\n")
+	if len(lines) == 0 {
+		return
+	}
+	cursorLine := m.textarea.Line()
+	cursorCol := m.textarea.LineInfo().ColumnOffset
+	selStartRow := m.visualStartRow
+	selStartCol := m.visualStartCol
+	selEndRow := cursorLine
+	selEndCol := cursorCol
+	if selStartRow > selEndRow || (selStartRow == selEndRow && selStartCol > selEndCol) {
+		selStartRow, selEndRow = selEndRow, selStartRow
+		selStartCol, selEndCol = selEndCol, selStartCol
+	}
+	var sb strings.Builder
+	for row := selStartRow; row <= selEndRow; row++ {
+		if row >= len(lines) {
+			break
+		}
+		line := lines[row]
+		runes := []rune(line)
+		startCol := 0
+		endCol := len(runes)
+		if row == selStartRow {
+			startCol = selStartCol
+		}
+		if row == selEndRow {
+			endCol = selEndCol
+		}
+		if startCol > len(runes) {
+			startCol = len(runes)
+		}
+		if endCol > len(runes) {
+			endCol = len(runes)
+		}
+		if startCol < endCol {
+			sb.WriteString(string(runes[startCol:endCol]))
+		}
+		if row < selEndRow {
+			sb.WriteByte('\n')
+		}
+	}
+	if sb.Len() > 0 {
+		clipboard.WriteAll(sb.String())
+	}
 }
 
 func (m *EditorModel) applyGhostIndex() {
@@ -351,7 +448,7 @@ func (m EditorModel) View() string {
 	}
 
 	titleLeft := HeaderStyle.Render("SQL Editor")
-	titleRight := DimText.Render("Ctrl+Y copy | Ctrl+V paste | Ctrl+J run | Ctrl+E all | Ctrl+O scripts")
+	titleRight := DimText.Render("Shift+Arrows select | Ctrl+C copy sel | Ctrl+Y all | Ctrl+V paste | Ctrl+J run | Ctrl+E all")
 	gap := innerW - lipgloss.Width(titleLeft) - lipgloss.Width(titleRight)
 	if gap < 1 {
 		gap = 1
@@ -373,6 +470,17 @@ func (m EditorModel) renderHighlightedText() string {
 	cursorLine := m.textarea.Line()
 	li := m.textarea.LineInfo()
 	cursorCol := li.ColumnOffset
+
+	selStartRow := m.visualStartRow
+	selStartCol := m.visualStartCol
+	selEndRow := cursorLine
+	selEndCol := cursorCol
+	if m.visualMode {
+		if selStartRow > selEndRow || (selStartRow == selEndRow && selStartCol > selEndCol) {
+			selStartRow, selEndRow = selEndRow, selStartRow
+			selStartCol, selEndCol = selEndCol, selStartCol
+		}
+	}
 
 	var result strings.Builder
 	lineNumWidth := 4
@@ -406,25 +514,37 @@ func (m EditorModel) renderHighlightedText() string {
 			line = lines[i]
 		}
 
-		if i == cursorLine && m.focused {
-			before := ""
-			cursorChar := " "
-			after := ""
-
-			runes := []rune(line)
-			if cursorCol < len(runes) {
-				before = string(runes[:cursorCol])
-				cursorChar = string(runes[cursorCol])
-				if cursorCol+1 < len(runes) {
-					after = string(runes[cursorCol+1:])
-				}
+		runes := []rune(line)
+		lineSelStart := -1
+		lineSelEnd := -1
+		if m.visualMode && selStartRow <= i && i <= selEndRow {
+			if i == selStartRow {
+				lineSelStart = selStartCol
 			} else {
-				before = line
+				lineSelStart = 0
+			}
+			if i == selEndRow {
+				lineSelEnd = selEndCol
+			} else {
+				lineSelEnd = len(runes)
+			}
+			if lineSelStart > len(runes) {
+				lineSelStart = len(runes)
+			}
+			if lineSelEnd > len(runes) {
+				lineSelEnd = len(runes)
+			}
+		}
+
+		if i == cursorLine && m.focused {
+			cursorChar := " "
+			if cursorCol < len(runes) {
+				cursorChar = string(runes[cursorCol])
 			}
 
-			highlightedBefore := HighlightSQL(before)
+			highlightedBefore := m.renderLineSegment(runes, 0, cursorCol, lineSelStart, lineSelEnd)
 			cursorStyled := lipgloss.NewStyle().Reverse(true).Render(cursorChar)
-			highlightedAfter := HighlightSQL(after)
+			highlightedAfter := m.renderLineSegment(runes, cursorCol+1, len(runes), lineSelStart, lineSelEnd)
 
 			result.WriteString(lineNumStyled)
 			result.WriteString("  ")
@@ -436,9 +556,10 @@ func (m EditorModel) renderHighlightedText() string {
 				result.WriteString(GhostStyle.Render(m.ghost))
 			}
 		} else {
+			rendered := m.renderLineSegment(runes, 0, len(runes), lineSelStart, lineSelEnd)
 			result.WriteString(lineNumStyled)
 			result.WriteString("  ")
-			result.WriteString(HighlightSQL(line))
+			result.WriteString(rendered)
 		}
 
 		if i < endLine-1 {
@@ -447,4 +568,33 @@ func (m EditorModel) renderHighlightedText() string {
 	}
 
 	return result.String()
+}
+
+func (m EditorModel) renderLineSegment(runes []rune, from, to int, selStart, selEnd int) string {
+	if from >= to {
+		return ""
+	}
+	var sb strings.Builder
+	hasSel := selStart >= 0 && selEnd >= 0 && selStart < selEnd
+	if !hasSel {
+		return HighlightSQL(string(runes[from:to]))
+	}
+	segStart := from
+	for segStart < to {
+		if segStart < selStart && selStart < to {
+			sb.WriteString(HighlightSQL(string(runes[segStart:selStart])))
+			segStart = selStart
+		} else if segStart >= selStart && segStart < selEnd {
+			end := selEnd
+			if end > to {
+				end = to
+			}
+			sb.WriteString(lipgloss.NewStyle().Reverse(true).Render(string(runes[segStart:end])))
+			segStart = end
+		} else {
+			sb.WriteString(HighlightSQL(string(runes[segStart:to])))
+			segStart = to
+		}
+	}
+	return sb.String()
 }
