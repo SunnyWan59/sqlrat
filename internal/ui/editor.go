@@ -36,6 +36,7 @@ type EditorModel struct {
 	ghostMatches    []ghostCandidate
 	ghostIndex      int
 	tableNames      []string
+	columnNames     []string
 	visualMode      bool
 	visualStartRow  int
 	visualStartCol  int
@@ -44,6 +45,11 @@ type EditorModel struct {
 // SetTableNames updates the list of table names used for autocomplete.
 func (m *EditorModel) SetTableNames(names []string) {
 	m.tableNames = names
+}
+
+// SetColumnNames updates the list of column names for autocomplete in SELECT/WHERE contexts.
+func (m *EditorModel) SetColumnNames(names []string) {
+	m.columnNames = names
 }
 
 // NewEditorModel creates a new SQL editor.
@@ -309,6 +315,41 @@ func (m *EditorModel) applyGhostIndex() {
 	m.ghostPartialLen = c.partial
 }
 
+func (m *EditorModel) isInColumnContext(lines []string, cursorLine int, line string, partialStart int) bool {
+	if len(m.columnNames) == 0 {
+		return false
+	}
+	var before strings.Builder
+	for i := 0; i < cursorLine && i < len(lines); i++ {
+		before.WriteString(lines[i])
+		before.WriteByte('\n')
+	}
+	if partialStart > 0 && partialStart <= len(line) {
+		before.WriteString(line[:partialStart])
+	}
+	trimmed := strings.TrimRight(before.String(), " \t\n")
+	trimmed = strings.ReplaceAll(trimmed, "\n", " ")
+	trimmed = strings.ReplaceAll(trimmed, "\t", " ")
+	for strings.Contains(trimmed, "  ") {
+		trimmed = strings.ReplaceAll(trimmed, "  ", " ")
+	}
+	if len(trimmed) == 0 {
+		return false
+	}
+	if strings.HasSuffix(trimmed, ".") || strings.HasSuffix(strings.TrimRight(trimmed, " "), ",") {
+		return true
+	}
+	trimmed += " "
+	beforeUpper := strings.ToUpper(trimmed)
+	trims := []string{"SELECT ", "SELECT DISTINCT ", "WHERE ", " AND ", " OR ", " ON ", "ORDER BY ", "GROUP BY ", "HAVING ", "SET ", "RETURNING "}
+	for _, t := range trims {
+		if strings.HasSuffix(beforeUpper, t) {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *EditorModel) updateGhost() {
 	text := m.textarea.Value()
 	lines := strings.Split(text, "\n")
@@ -353,34 +394,55 @@ func (m *EditorModel) updateGhost() {
 	}
 
 	partial := strings.ToUpper(line[start:end])
-	if len(partial) < 2 {
+	partialLower := strings.ToLower(line[start:end])
+	pLen := end - start
+
+	inColumnContext := m.isInColumnContext(lines, cursorLine, line, start)
+	minLen := 2
+	if inColumnContext {
+		minLen = 1
+	}
+	if len(partial) < minLen {
 		m.clearGhost()
 		return
 	}
 
-	pLen := end - start
 	var matches []ghostCandidate
 
-	allKeywords := append(sqlKeywords, sqlFunctions...)
-	for _, kw := range allKeywords {
-		if strings.HasPrefix(kw, partial) && kw != partial {
-			matches = append(matches, ghostCandidate{
-				full:    kw,
-				suffix:  kw[len(partial):],
-				partial: pLen,
-			})
+	if inColumnContext {
+		for _, cn := range m.columnNames {
+			lower := strings.ToLower(cn)
+			if strings.HasPrefix(lower, partialLower) && lower != partialLower {
+				matches = append(matches, ghostCandidate{
+					full:    cn,
+					suffix:  cn[len(partialLower):],
+					partial: pLen,
+				})
+			}
 		}
 	}
 
-	partialLower := strings.ToLower(line[start:end])
-	for _, tn := range m.tableNames {
-		lower := strings.ToLower(tn)
-		if strings.HasPrefix(lower, partialLower) && lower != partialLower {
-			matches = append(matches, ghostCandidate{
-				full:    tn,
-				suffix:  tn[len(partialLower):],
-				partial: pLen,
-			})
+	if len(matches) == 0 {
+		allKeywords := append(sqlKeywords, sqlFunctions...)
+		for _, kw := range allKeywords {
+			if strings.HasPrefix(kw, partial) && kw != partial {
+				matches = append(matches, ghostCandidate{
+					full:    kw,
+					suffix:  kw[len(partial):],
+					partial: pLen,
+				})
+			}
+		}
+
+		for _, tn := range m.tableNames {
+			lower := strings.ToLower(tn)
+			if strings.HasPrefix(lower, partialLower) && lower != partialLower {
+				matches = append(matches, ghostCandidate{
+					full:    tn,
+					suffix:  tn[len(partialLower):],
+					partial: pLen,
+				})
+			}
 		}
 	}
 
@@ -392,6 +454,11 @@ func (m *EditorModel) updateGhost() {
 	m.ghostMatches = matches
 	m.ghostIndex = 0
 	m.applyGhostIndex()
+}
+
+// GetStatementAtCursor returns the SQL statement containing the cursor.
+func (m EditorModel) GetStatementAtCursor() string {
+	return m.statementAtCursor()
 }
 
 func (m EditorModel) statementAtCursor() string {
@@ -550,11 +617,10 @@ func (m EditorModel) renderHighlightedText() string {
 			result.WriteString("  ")
 			result.WriteString(highlightedBefore)
 			result.WriteString(cursorStyled)
-			result.WriteString(highlightedAfter)
-
 			if m.ghost != "" {
 				result.WriteString(GhostStyle.Render(m.ghost))
 			}
+			result.WriteString(highlightedAfter)
 		} else {
 			rendered := m.renderLineSegment(runes, 0, len(runes), lineSelStart, lineSelEnd)
 			result.WriteString(lineNumStyled)

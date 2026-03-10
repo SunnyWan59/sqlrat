@@ -131,9 +131,10 @@ type Model struct {
 	changes           *editor.ChangeTracker
 	width             int
 	height            int
-	lastSQL           string
-	lastTable         string
-	lastError         string
+	lastSQL              string
+	lastTable            string
+	lastColumnRefreshTbl string
+	lastError            string
 	pendingDMLMsg     string
 	confirmClearEdits bool
 	currentScript     string
@@ -346,6 +347,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.sidebar.SetActiveDatabase(msg.switchedToDB)
 				m.sidebar.SetTables(msg.tables)
 				m.editor.SetTableNames(msg.tables)
+				m.editor.SetColumnNames(nil)
+				m.lastColumnRefreshTbl = ""
 				m.changes.Clear()
 				m.lastTable = ""
 				m.results.Clear()
@@ -391,6 +394,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.changes.Clear()
 			m.lastTable = ""
 			m.results.Clear()
+			m.editor.SetColumnNames(nil)
+			m.lastColumnRefreshTbl = ""
 			m.statusbar.SetMessage(fmt.Sprintf("Switched to %s (%d tables)", msg.dbName, len(msg.tables)), ui.MsgSuccess)
 		}
 		return m, nil
@@ -406,6 +411,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.results.SetData(msg.result.Columns, msg.result.ColumnTypes, msg.result.Rows)
 			m.results.SetTableContext(msg.tableName, msg.pks)
+			m.editor.SetColumnNames(msg.result.Columns)
 			if m.pendingDMLMsg != "" {
 				m.results.SetBanner(m.pendingDMLMsg)
 				m.statusbar.SetMessage(m.pendingDMLMsg, ui.MsgSuccess)
@@ -454,6 +460,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.lastTable = msg.tableName
 				m.results.SetData(msg.tableData.result.Columns, msg.tableData.result.ColumnTypes, msg.tableData.result.Rows)
 				m.results.SetTableContext(msg.tableData.tableName, msg.tableData.pks)
+				m.editor.SetColumnNames(msg.tableData.result.Columns)
 				m.statusbar.SetQueryInfo(msg.tableData.result.ExecTime, msg.tableData.result.RowCount)
 				m.statusbar.SetMessage(fmt.Sprintf("Created table %s", msg.tableName), ui.MsgSuccess)
 			} else {
@@ -470,6 +477,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if msg.result != nil {
 			m.results.SetData(msg.result.Columns, msg.result.ColumnTypes, msg.result.Rows)
 			m.results.SetTableContext(msg.tableName, msg.pks)
+			m.editor.SetColumnNames(msg.result.Columns)
 			if msg.tableName != "" {
 				m.lastTable = msg.tableName
 			}
@@ -584,6 +592,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusbar.SetSearchMode(m.sidebar.IsSearching())
 	case EditorPane:
 		m.editor, cmd = m.editor.Update(msg)
+		m.refreshEditorColumns()
 	case ResultsPane:
 		m.results, cmd = m.results.Update(msg)
 		m.statusbar.SetEditMode(m.results.IsEditing())
@@ -1040,6 +1049,32 @@ func extractDDLTableName(sql string) string {
 		}
 	}
 	return ""
+}
+
+func (m *Model) refreshEditorColumns() {
+	stmt := m.editor.GetStatementAtCursor()
+	if stmt == "" {
+		return
+	}
+	table := extractTableName(stmt)
+	if table == "" {
+		return
+	}
+	tableLower := strings.ToLower(table)
+	if tableLower == m.lastColumnRefreshTbl {
+		return
+	}
+	m.lastColumnRefreshTbl = tableLower
+	cols, err := m.db.GetColumns(tableLower)
+	if err != nil {
+		m.lastColumnRefreshTbl = ""
+		return
+	}
+	names := make([]string, len(cols))
+	for i, c := range cols {
+		names[i] = c.Name
+	}
+	m.editor.SetColumnNames(names)
 }
 
 func extractTableName(sql string) string {
