@@ -2,7 +2,11 @@ package app
 
 import (
 	"context"
+	"encoding/csv"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -120,6 +124,7 @@ type Model struct {
 	statusbar         ui.StatusBarModel
 	scriptsModal      ui.ScriptsModalModel
 	claudeModal       ui.ClaudeModalModel
+	exportModal       ui.ExportModalModel
 	chatPanel         ui.ChatPanelModel
 	diffModal         ui.DiffModalModel
 	db                *db.DB
@@ -157,6 +162,7 @@ func NewModel(database *db.DB, tables []string, databases []string) Model {
 	statusbar.SetActivePane(0)
 	scriptsModal := ui.NewScriptsModalModel()
 	claudeModal := ui.NewClaudeModalModel()
+	exportModal := ui.NewExportModalModel()
 	chatPanel := ui.NewChatPanelModel()
 	diffModal := ui.NewDiffModalModel()
 
@@ -173,6 +179,7 @@ func NewModel(database *db.DB, tables []string, databases []string) Model {
 		statusbar:    statusbar,
 		scriptsModal: scriptsModal,
 		claudeModal:  claudeModal,
+		exportModal:  exportModal,
 		chatPanel:    chatPanel,
 		diffModal:    diffModal,
 		db:           database,
@@ -195,6 +202,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.recalcLayout()
 		m.scriptsModal.SetSize(msg.Width, msg.Height)
 		m.claudeModal.SetSize(msg.Width, msg.Height)
+		m.exportModal.SetSize(msg.Width, msg.Height)
 		return m, nil
 
 	case tickMsg:
@@ -235,6 +243,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.claudeModal.Visible() {
 			var cmd tea.Cmd
 			m.claudeModal, cmd = m.claudeModal.Update(msg)
+			return m, cmd
+		}
+
+		if m.exportModal.Visible() {
+			var cmd tea.Cmd
+			m.exportModal, cmd = m.exportModal.Update(msg)
 			return m, cmd
 		}
 
@@ -403,6 +417,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.statusbar.SetQueryInfo(msg.result.ExecTime, msg.result.RowCount)
 		}
+		return m, nil
+
+	case ui.OpenExportModalMsg:
+		if len(msg.Columns) == 0 || len(msg.Rows) == 0 {
+			m.statusbar.SetMessage("No data to export", ui.MsgError)
+			return m, nil
+		}
+		m.exportModal.Open(msg.Columns, msg.Rows)
+		m.exportModal.SetSize(m.width, m.height)
+		return m, nil
+
+	case ui.ExportFormatSelectedMsg:
+		path, err := m.exportResults(msg.Format, msg.Columns, msg.Rows)
+		if err != nil {
+			m.statusbar.SetMessage("Export failed: "+err.Error(), ui.MsgError)
+			return m, nil
+		}
+		m.statusbar.SetMessage(fmt.Sprintf("Exported %d rows to %s", len(msg.Rows), path), ui.MsgSuccess)
+		return m, nil
+
+	case ui.ExportModalClosedMsg:
 		return m, nil
 
 	case ui.ExecuteQueryMsg:
@@ -644,6 +679,11 @@ func (m Model) View() string {
 		return m.scriptsModal.View()
 	}
 
+	if m.exportModal.Visible() {
+		m.exportModal.SetSize(m.width, m.height)
+		return m.exportModal.View()
+	}
+
 	return baseView
 }
 
@@ -797,6 +837,86 @@ func (m *Model) copyDatabase(source, target string) tea.Cmd {
 		}
 		return copyDBResultMsg{databases: databases, target: target}
 	}
+}
+
+func (m *Model) exportResults(format string, columns []string, rows [][]string) (string, error) {
+	timestamp := time.Now().Format("20060102_150405")
+	ext := format
+	if ext == "" {
+		ext = "csv"
+	}
+	name := fmt.Sprintf("sqlrat_export_%s.%s", timestamp, ext)
+	path, err := filepath.Abs(name)
+	if err != nil {
+		path = name
+	}
+
+	f, err := os.Create(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	switch format {
+	case ui.ExportFormatJSON:
+		recs := make([]map[string]string, 0, len(rows))
+		for _, row := range rows {
+			rec := make(map[string]string)
+			for i, col := range columns {
+				if i < len(row) {
+					rec[col] = row[i]
+				} else {
+					rec[col] = ""
+				}
+			}
+			recs = append(recs, rec)
+		}
+		enc := json.NewEncoder(f)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(recs); err != nil {
+			return "", err
+		}
+	case ui.ExportFormatTSV:
+		for i, col := range columns {
+			if i > 0 {
+				_, _ = f.WriteString("\t")
+			}
+			_, _ = f.WriteString(escapeTSV(col))
+		}
+		_, _ = f.WriteString("\n")
+		for _, row := range rows {
+			for i, cell := range row {
+				if i > 0 {
+					_, _ = f.WriteString("\t")
+				}
+				_, _ = f.WriteString(escapeTSV(cell))
+			}
+			_, _ = f.WriteString("\n")
+		}
+	default:
+		w := csv.NewWriter(f)
+		if err := w.Write(columns); err != nil {
+			return "", err
+		}
+		for _, row := range rows {
+			if err := w.Write(row); err != nil {
+				return "", err
+			}
+		}
+		w.Flush()
+		if err := w.Error(); err != nil {
+			return "", err
+		}
+	}
+
+	return path, nil
+}
+
+func escapeTSV(s string) string {
+	if strings.ContainsAny(s, "\t\n\"") {
+		return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
+	}
+	return s
 }
 
 func (m *Model) switchDatabase(name string) tea.Cmd {

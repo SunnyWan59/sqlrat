@@ -17,6 +17,12 @@ type EditBlockedMsg struct {
 	Reason string
 }
 
+// OpenExportModalMsg is sent when the user requests to export results.
+type OpenExportModalMsg struct {
+	Columns []string
+	Rows    [][]string
+}
+
 // ResultsModel is the interactive results table with CRUD support.
 type ResultsModel struct {
 	columns         []string
@@ -336,6 +342,13 @@ func (m ResultsModel) updateNavMode(msg tea.KeyMsg) (ResultsModel, tea.Cmd) {
 					TableName:   m.tableName,
 					RowPKValues: pkVals,
 				})
+			}
+		}
+	case "E":
+		if len(m.rows) > 0 && len(m.columns) > 0 {
+			cols, exportRows := m.exportData()
+			return m, func() tea.Msg {
+				return OpenExportModalMsg{Columns: cols, Rows: exportRows}
 			}
 		}
 	case "a":
@@ -1035,6 +1048,33 @@ func (m *ResultsModel) copySelection() {
 	content := b.String()
 	m.clipboard = content
 	clipboard.WriteAll(content)
+}
+
+func (m ResultsModel) exportData() ([]string, [][]string) {
+	if len(m.columns) == 0 || len(m.rows) == 0 {
+		return nil, nil
+	}
+	cols := make([]string, len(m.columns))
+	copy(cols, m.columns)
+	var exportRows [][]string
+	if len(m.filteredIndices) > 0 {
+		exportRows = make([][]string, 0, len(m.filteredIndices))
+		for _, idx := range m.filteredIndices {
+			if idx < len(m.rows) {
+				row := make([]string, len(m.columns))
+				copy(row, m.rows[idx])
+				exportRows = append(exportRows, row)
+			}
+		}
+	} else {
+		exportRows = make([][]string, len(m.rows))
+		for i, row := range m.rows {
+			r := make([]string, len(m.columns))
+			copy(r, row)
+			exportRows[i] = r
+		}
+	}
+	return cols, exportRows
 }
 
 func (m ResultsModel) pasteFromClipboard() ResultsModel {

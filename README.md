@@ -70,6 +70,7 @@ Ask Claude for SQL help directly in the editor:
 - `y` - Copy cell (or selection in visual mode)
 - `p` - Paste from clipboard
 - `V` - Toggle visual selection mode
+- `E` - Export results (choose CSV, JSON, or TSV)
 - `d` - Delete row (toggle)
 - `a` - Add new row
 - `v` - Preview cell in large viewer

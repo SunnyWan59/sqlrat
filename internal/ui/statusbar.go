@@ -175,7 +175,7 @@ func (m StatusBarModel) contextHints() string {
 	case 1: // editor
 		return "Ctrl+J Line | Ctrl+E All | Ctrl+O Scripts | Alt+I Claude | Tab Switch pane"
 	case 2: // results
-		return "hjkl Navigate | e Edit | y Copy | p Paste | V Visual | d Delete | a Add | Alt+I Claude"
+		return "hjkl Navigate | e Edit | y Copy | p Paste | V Visual | E Export | d Delete | a Add | Alt+I Claude"
 	default:
 		return "Tab Switch pane | Alt+I Claude | Ctrl+C Quit"
 	}
