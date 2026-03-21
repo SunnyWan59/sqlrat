@@ -100,6 +100,16 @@ func (m *ResultsModel) SetData(columns []string, columnTypes []string, rows [][]
 	m.calcColWidths()
 }
 
+// GetColumns returns the current result column names.
+func (m *ResultsModel) GetColumns() []string {
+	return m.columns
+}
+
+// GetRows returns the current result rows.
+func (m *ResultsModel) GetRows() [][]string {
+	return m.rows
+}
+
 // SetTableContext sets the current table name and PKs for CRUD.
 func (m *ResultsModel) SetTableContext(tableName string, pks []string) {
 	m.tableName = tableName

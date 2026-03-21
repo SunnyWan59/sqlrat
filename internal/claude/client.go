@@ -19,11 +19,17 @@ type Message struct {
 	Content string `json:"content"`
 }
 
+type QueryResults struct {
+	Columns []string   `json:"columns"`
+	Rows    [][]string `json:"rows"`
+}
+
 type ChatRequest struct {
-	Messages   []Message `json:"messages"`
-	CurrentSQL string    `json:"current_sql"`
-	Tables     []string  `json:"tables"`
-	LastError  string    `json:"last_error"`
+	Messages     []Message     `json:"messages"`
+	CurrentSQL   string        `json:"current_sql"`
+	Tables       []string      `json:"tables"`
+	LastError    string        `json:"last_error"`
+	QueryResults *QueryResults `json:"query_results,omitempty"`
 }
 
 type DiffPayload struct {
@@ -32,8 +38,9 @@ type DiffPayload struct {
 }
 
 type DonePayload struct {
-	FullResponse string      `json:"full_response"`
-	Diff         DiffPayload `json:"diff"`
+	FullResponse string       `json:"full_response"`
+	ResponseType string       `json:"response_type"` // "sql" or "text"
+	Diff         *DiffPayload `json:"diff,omitempty"`
 }
 
 type StreamEvent struct {

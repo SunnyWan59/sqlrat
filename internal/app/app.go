@@ -112,7 +112,7 @@ type dropDBResultMsg struct {
 }
 
 type claudeResponseMsg struct {
-	response string // text explanation from Claude
+	response string              // text explanation from Claude
 	diff     *claude.DiffPayload // optional SQL diff
 	err      error
 }
@@ -123,28 +123,28 @@ type claudeStreamTokenMsg struct {
 
 // Model is the root Bubble Tea model.
 type Model struct {
-	activePane        Pane
-	sidebar           ui.SidebarModel
-	editor            ui.EditorModel
-	results           ui.ResultsModel
-	statusbar         ui.StatusBarModel
-	scriptsModal      ui.ScriptsModalModel
-	claudeModal       ui.ClaudeModalModel
-	exportModal       ui.ExportModalModel
-	chatPanel         ui.ChatPanelModel
-	diffModal         ui.DiffModalModel
-	db                *db.DB
-	changes           *editor.ChangeTracker
-	width             int
-	height            int
+	activePane           Pane
+	sidebar              ui.SidebarModel
+	editor               ui.EditorModel
+	results              ui.ResultsModel
+	statusbar            ui.StatusBarModel
+	scriptsModal         ui.ScriptsModalModel
+	claudeModal          ui.ClaudeModalModel
+	exportModal          ui.ExportModalModel
+	chatPanel            ui.ChatPanelModel
+	diffModal            ui.DiffModalModel
+	db                   *db.DB
+	changes              *editor.ChangeTracker
+	width                int
+	height               int
 	lastSQL              string
 	lastTable            string
 	lastColumnRefreshTbl string
 	lastError            string
-	pendingDMLMsg     string
-	confirmClearEdits bool
-	currentScript     string
-	claudeClient      *claude.Client
+	pendingDMLMsg        string
+	confirmClearEdits    bool
+	currentScript        string
+	claudeClient         *claude.Client
 }
 
 func init() {
@@ -1191,8 +1191,8 @@ func (m *Model) askClaude(prompt string) tea.Cmd {
 			case "done":
 				if event.Done != nil {
 					response = event.Done.FullResponse
-					if event.Done.Diff.NewSQL != "" {
-						diff = &event.Done.Diff
+					if event.Done.ResponseType == "sql" && event.Done.Diff != nil {
+						diff = event.Done.Diff
 					}
 				}
 			case "error":
@@ -1210,6 +1210,15 @@ func (m *Model) askClaudeChat(prompt string) tea.Cmd {
 	tables := m.sidebar.GetTables()
 	conversationHistory := m.chatPanel.GetConversationHistory()
 
+	// Capture current query results for context
+	var queryResults *claude.QueryResults
+	if cols := m.results.GetColumns(); len(cols) > 0 {
+		queryResults = &claude.QueryResults{
+			Columns: cols,
+			Rows:    m.results.GetRows(),
+		}
+	}
+
 	return func() tea.Msg {
 		var messages []claude.Message
 
@@ -1226,10 +1235,11 @@ func (m *Model) askClaudeChat(prompt string) tea.Cmd {
 		})
 
 		req := claude.ChatRequest{
-			Messages:   messages,
-			CurrentSQL: currentSQL,
-			Tables:     tables,
-			LastError:  lastError,
+			Messages:     messages,
+			CurrentSQL:   currentSQL,
+			Tables:       tables,
+			LastError:    lastError,
+			QueryResults: queryResults,
 		}
 
 		log.Printf("[askClaudeChat] sending %d messages to backend", len(messages))
@@ -1244,9 +1254,9 @@ func (m *Model) askClaudeChat(prompt string) tea.Cmd {
 			case "done":
 				if event.Done != nil {
 					response = event.Done.FullResponse
-					log.Printf("[askClaudeChat] done: fullResponse=%d chars, newSQL=%d chars", len(response), len(event.Done.Diff.NewSQL))
-					if event.Done.Diff.NewSQL != "" {
-						diff = &event.Done.Diff
+					log.Printf("[askClaudeChat] done: fullResponse=%d chars, type=%s", len(response), event.Done.ResponseType)
+					if event.Done.ResponseType == "sql" && event.Done.Diff != nil {
+						diff = event.Done.Diff
 					}
 				}
 			case "error":
