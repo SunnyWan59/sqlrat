@@ -5,6 +5,7 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -111,8 +112,13 @@ type dropDBResultMsg struct {
 }
 
 type claudeResponseMsg struct {
-	response string
+	response string // text explanation from Claude
+	diff     *claude.DiffPayload // optional SQL diff
 	err      error
+}
+
+type claudeStreamTokenMsg struct {
+	content string
 }
 
 // Model is the root Bubble Tea model.
@@ -139,6 +145,13 @@ type Model struct {
 	confirmClearEdits bool
 	currentScript     string
 	claudeClient      *claude.Client
+}
+
+func init() {
+	f, err := os.OpenFile("/tmp/sqlrat-debug.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err == nil {
+		log.SetOutput(f)
+	}
 }
 
 // NewModel creates the root app model.
@@ -171,8 +184,10 @@ func NewModel(database *db.DB, tables []string, databases []string) Model {
 	diffModal := ui.NewDiffModalModel()
 
 	var claudeClient *claude.Client
-	if apiKey := env.Get("ANTHROPIC_API_KEY"); apiKey != "" {
-		claudeClient = claude.NewClient(apiKey)
+	if backendURL := env.Get("SQL_RAT_BACKEND_URL"); backendURL != "" {
+		claudeClient = claude.NewClient(backendURL)
+	} else {
+		claudeClient = claude.NewClient("")
 	}
 
 	return Model{
@@ -235,7 +250,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case ui.ChatPanelSendMsg:
-		return m, m.askClaudeChat(msg.Prompt)
+		log.Printf("[app] ChatPanelSendMsg received: prompt=%q", msg.Prompt)
+		return m, tea.Batch(m.askClaudeChat(msg.Prompt), spinnerTickCmd())
 
 	case tea.KeyMsg:
 		if m.chatPanel.Visible() {
@@ -324,10 +340,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.scriptsModal.Open(m.editor.Value())
 			return m, nil
 		case "alt+i":
-			if m.claudeClient == nil {
-				m.statusbar.SetMessage("Claude API not configured (set ANTHROPIC_API_KEY in .env)", ui.MsgError)
-				return m, nil
-			}
 			m.chatPanel.Toggle()
 			m.chatPanel.SetCurrentSQL(m.editor.Value())
 			return m, nil
@@ -377,8 +389,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case spinnerTickMsg:
+		needsTick := false
 		if m.statusbar.IsCopyingDB() {
 			m.statusbar.AdvanceSpinner()
+			needsTick = true
+		}
+		if m.chatPanel.Visible() && m.chatPanel.IsWaiting() {
+			m.chatPanel.AdvanceSpinner()
+			needsTick = true
+		}
+		if needsTick {
 			return m, spinnerTickCmd()
 		}
 		return m, nil
@@ -543,9 +563,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case claudeStreamTokenMsg:
+		if m.chatPanel.Visible() {
+			m.chatPanel.AppendStreamToken(msg.content)
+		}
+		return m, nil
+
 	case claudeResponseMsg:
+		log.Printf("[app] claudeResponseMsg: response=%d chars, hasDiff=%v, err=%v, chatVisible=%v, claudeVisible=%v",
+			len(msg.response), msg.diff != nil, msg.err, m.chatPanel.Visible(), m.claudeModal.Visible())
+		if msg.diff != nil {
+			log.Printf("[app] diff: oldSQL=%d chars, newSQL=%d chars", len(msg.diff.OldSQL), len(msg.diff.NewSQL))
+		}
 		m.claudeModal.SetWaiting(false)
 		m.chatPanel.SetWaiting(false)
+		m.chatPanel.FinishStreaming()
 
 		if msg.err != nil {
 			if m.claudeModal.Visible() {
@@ -555,24 +587,42 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.chatPanel.AddAssistantMessage("Error: " + msg.err.Error())
 			}
 			m.statusbar.SetMessage("Claude error: "+msg.err.Error(), ui.MsgError)
-		} else {
-			if m.claudeModal.Visible() {
-				m.claudeModal.Close()
+		} else if m.claudeModal.Visible() {
+			m.claudeModal.Close()
+			if msg.diff != nil {
+				m.diffModal.Show(msg.diff.OldSQL, msg.diff.NewSQL)
+			} else {
 				oldSQL := m.claudeModal.GetOriginalSQL()
 				m.diffModal.Show(oldSQL, msg.response)
-				m.statusbar.SetMessage("Review Claude's suggested changes", ui.MsgSuccess)
-			} else if m.chatPanel.Visible() {
-				oldSQL := m.chatPanel.GetCurrentSQL()
-				m.chatPanel.AddDiffMessage(oldSQL, msg.response)
+			}
+			m.statusbar.SetMessage("Review Claude's suggested changes", ui.MsgSuccess)
+		} else if m.chatPanel.Visible() {
+			if msg.diff != nil {
+				// Backend provided an explicit diff — show in chat and editor.
+				if msg.response != "" {
+					m.chatPanel.AddAssistantMessage(msg.response)
+				}
+				m.chatPanel.AddDiffMessage(msg.diff.OldSQL, msg.diff.NewSQL)
+				m.editor.ShowDiff(msg.diff.OldSQL, msg.diff.NewSQL)
 				m.statusbar.SetMessage("Review changes (y to accept, n to reject)", ui.MsgSuccess)
+			} else if msg.response != "" {
+				// Text-only response (no SQL change suggested).
+				m.chatPanel.AddAssistantMessage(msg.response)
+				m.statusbar.SetMessage("Claude responded", ui.MsgSuccess)
 			}
 		}
 		return m, nil
 
 	case ui.ChatPanelAcceptDiffMsg:
 		newSQL := m.chatPanel.AcceptDiff()
+		m.editor.ClearDiff()
 		m.editor.SetValue(newSQL)
 		m.statusbar.SetMessage("Changes applied", ui.MsgSuccess)
+		return m, nil
+
+	case ui.ChatPanelRejectDiffMsg:
+		m.editor.ClearDiff()
+		m.statusbar.SetMessage("Changes rejected", ui.MsgInfo)
 		return m, nil
 
 	case ui.DiffModalAcceptedMsg:
@@ -1123,40 +1173,33 @@ func (m *Model) askClaude(prompt string) tea.Cmd {
 	m.claudeModal.SetWaiting(true)
 	originalSQL := m.claudeModal.GetOriginalSQL()
 	lastError := m.lastError
+	tables := m.sidebar.GetTables()
 
 	return func() tea.Msg {
-		context := ""
-		if strings.TrimSpace(originalSQL) != "" {
-			context = fmt.Sprintf("\n\nCurrent SQL:\n```sql\n%s\n```", originalSQL)
+		req := claude.ChatRequest{
+			Messages:   []claude.Message{{Role: "user", Content: prompt}},
+			CurrentSQL: originalSQL,
+			Tables:     tables,
+			LastError:  lastError,
 		}
 
-		if lastError != "" {
-			context += fmt.Sprintf("\n\nLast Error:\n%s", lastError)
+		events := m.claudeClient.SendMessageStream(req)
+		var response string
+		var diff *claude.DiffPayload
+		for event := range events {
+			switch event.Type {
+			case "done":
+				if event.Done != nil {
+					response = event.Done.FullResponse
+					if event.Done.Diff.NewSQL != "" {
+						diff = &event.Done.Diff
+					}
+				}
+			case "error":
+				return claudeResponseMsg{err: fmt.Errorf("%s", event.Error)}
+			}
 		}
-
-		fullPrompt := fmt.Sprintf("%s%s", prompt, context)
-
-		systemPrompt := fmt.Sprintf(`You are a PostgreSQL expert. The user is working with these tables: %s
-
-CRITICAL: Respond ONLY with SQL code. No explanations, no markdown formatting, no comments unless they are SQL comments.
-- Return ONLY executable PostgreSQL SQL
-- Do NOT use markdown code blocks
-- Do NOT add any text before or after the SQL
-- If fixing SQL, return the corrected version only
-- If generating new SQL, return only the query`, strings.Join(m.sidebar.GetTables(), ", "))
-
-		response, err := m.claudeClient.SendMessage(fullPrompt, systemPrompt)
-		if err != nil {
-			return claudeResponseMsg{err: err}
-		}
-
-		cleaned := strings.TrimSpace(response)
-		cleaned = strings.TrimPrefix(cleaned, "```sql")
-		cleaned = strings.TrimPrefix(cleaned, "```")
-		cleaned = strings.TrimSuffix(cleaned, "```")
-		cleaned = strings.TrimSpace(cleaned)
-
-		return claudeResponseMsg{response: cleaned}
+		return claudeResponseMsg{response: response, diff: diff}
 	}
 }
 
@@ -1164,68 +1207,54 @@ func (m *Model) askClaudeChat(prompt string) tea.Cmd {
 	m.chatPanel.SetWaiting(true)
 	currentSQL := m.chatPanel.GetCurrentSQL()
 	lastError := m.lastError
+	tables := m.sidebar.GetTables()
 	conversationHistory := m.chatPanel.GetConversationHistory()
 
 	return func() tea.Msg {
 		var messages []claude.Message
 
-		context := ""
-		if strings.TrimSpace(currentSQL) != "" {
-			context += fmt.Sprintf("Current SQL in editor:\n```sql\n%s\n```\n\n", currentSQL)
-		}
-
-		if lastError != "" {
-			context += fmt.Sprintf("Recent error:\n%s\n\n", lastError)
-		}
-
-		if len(conversationHistory) > 0 {
-			for _, msg := range conversationHistory {
-				messages = append(messages, claude.Message{
-					Role:    msg.Role,
-					Content: msg.Content,
-				})
-			}
-		}
-
-		userMessage := prompt
-		if context != "" {
-			userMessage = context + prompt
+		for _, msg := range conversationHistory {
+			messages = append(messages, claude.Message{
+				Role:    msg.Role,
+				Content: msg.Content,
+			})
 		}
 
 		messages = append(messages, claude.Message{
 			Role:    "user",
-			Content: userMessage,
+			Content: prompt,
 		})
 
-		systemPrompt := fmt.Sprintf(`You are a PostgreSQL expert. The user is working with these tables: %s
+		req := claude.ChatRequest{
+			Messages:   messages,
+			CurrentSQL: currentSQL,
+			Tables:     tables,
+			LastError:  lastError,
+		}
 
-CRITICAL: Respond ONLY with SQL code. No explanations, no markdown formatting, no comments unless they are SQL comments.
-- Return ONLY executable PostgreSQL SQL
-- Do NOT use markdown code blocks
-- Do NOT add any text before or after the SQL
-- If fixing SQL, return the corrected version only
-- If generating new SQL, return only the query
-- The user will show you their current SQL and any errors they're experiencing`, strings.Join(m.sidebar.GetTables(), ", "))
-
+		log.Printf("[askClaudeChat] sending %d messages to backend", len(messages))
+		events := m.claudeClient.SendMessageStream(req)
 		var response string
-		var err error
-
-		if len(messages) == 1 {
-			response, err = m.claudeClient.SendMessage(userMessage, systemPrompt)
-		} else {
-			response, err = m.claudeClient.SendConversation(messages, systemPrompt)
+		var diff *claude.DiffPayload
+		for event := range events {
+			log.Printf("[askClaudeChat] event: type=%s", event.Type)
+			switch event.Type {
+			case "token":
+				// Tokens are accumulated; full response is sent at the end.
+			case "done":
+				if event.Done != nil {
+					response = event.Done.FullResponse
+					log.Printf("[askClaudeChat] done: fullResponse=%d chars, newSQL=%d chars", len(response), len(event.Done.Diff.NewSQL))
+					if event.Done.Diff.NewSQL != "" {
+						diff = &event.Done.Diff
+					}
+				}
+			case "error":
+				log.Printf("[askClaudeChat] error: %s", event.Error)
+				return claudeResponseMsg{err: fmt.Errorf("%s", event.Error)}
+			}
 		}
-
-		if err != nil {
-			return claudeResponseMsg{err: err}
-		}
-
-		cleaned := strings.TrimSpace(response)
-		cleaned = strings.TrimPrefix(cleaned, "```sql")
-		cleaned = strings.TrimPrefix(cleaned, "```")
-		cleaned = strings.TrimSuffix(cleaned, "```")
-		cleaned = strings.TrimSpace(cleaned)
-
-		return claudeResponseMsg{response: cleaned}
+		log.Printf("[askClaudeChat] returning response=%d chars, hasDiff=%v", len(response), diff != nil)
+		return claudeResponseMsg{response: response, diff: diff}
 	}
 }

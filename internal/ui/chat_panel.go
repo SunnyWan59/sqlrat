@@ -26,17 +26,25 @@ type ChatPanelAcceptDiffMsg struct{}
 
 type ChatPanelRejectDiffMsg struct{}
 
+var chatSpinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+// ChatSpinnerTickMsg triggers a spinner frame advance in the chat panel.
+type ChatSpinnerTickMsg struct{}
+
 type ChatPanelModel struct {
-	visible        bool
-	messages       []ChatMessage
-	input          textarea.Model
-	width          int
-	height         int
-	scrollOffset   int
-	waiting        bool
-	currentSQL     string
-	pendingDiffSQL string
-	showingDiff    bool
+	visible          bool
+	messages         []ChatMessage
+	input            textarea.Model
+	width            int
+	height           int
+	scrollOffset     int
+	waiting          bool
+	currentSQL       string
+	pendingDiffSQL   string
+	showingDiff      bool
+	streamingContent   string
+	spinnerFrame       int
+	needsScrollToBottom bool
 }
 
 func NewChatPanelModel() ChatPanelModel {
@@ -144,6 +152,26 @@ func (m *ChatPanelModel) HasPendingDiff() bool {
 
 func (m *ChatPanelModel) SetWaiting(waiting bool) {
 	m.waiting = waiting
+	if !waiting {
+		m.spinnerFrame = 0
+	}
+}
+
+func (m *ChatPanelModel) IsWaiting() bool {
+	return m.waiting
+}
+
+func (m *ChatPanelModel) AdvanceSpinner() {
+	m.spinnerFrame = (m.spinnerFrame + 1) % len(chatSpinnerFrames)
+}
+
+func (m *ChatPanelModel) AppendStreamToken(token string) {
+	m.streamingContent += token
+	m.scrollToBottom()
+}
+
+func (m *ChatPanelModel) FinishStreaming() {
+	m.streamingContent = ""
 }
 
 func (m *ChatPanelModel) ClearMessages() {
@@ -152,10 +180,18 @@ func (m *ChatPanelModel) ClearMessages() {
 }
 
 func (m *ChatPanelModel) scrollToBottom() {
+	if m.width == 0 || m.height == 0 {
+		m.scrollOffset = 0
+		m.needsScrollToBottom = true
+		return
+	}
 	maxScroll := m.maxScrollOffset()
 	if maxScroll > 0 {
 		m.scrollOffset = maxScroll
+	} else {
+		m.scrollOffset = 0
 	}
+	m.needsScrollToBottom = false
 }
 
 func (m *ChatPanelModel) maxScrollOffset() int {
@@ -196,9 +232,15 @@ func (m *ChatPanelModel) maxScrollOffset() int {
 	}
 	
 	if m.waiting {
-		messagesView.WriteString(DimText.Render("Claude is typing...") + "\n\n")
+		if m.streamingContent != "" {
+			messagesView.WriteString(DimText.Render("Claude:") + "\n")
+			wrapped := wrapText(m.streamingContent, m.width-4)
+			messagesView.WriteString(wrapped + "\n\n")
+		} else {
+			messagesView.WriteString("Thinking...\n\n")
+		}
 	}
-	
+
 	allMessages := messagesView.String()
 	totalLines := len(strings.Split(allMessages, "\n"))
 	
@@ -233,6 +275,9 @@ func (m *ChatPanelModel) SetSize(w, h int) {
 		inputWidth = 20
 	}
 	m.input.SetWidth(inputWidth)
+	if m.needsScrollToBottom {
+		m.scrollToBottom()
+	}
 }
 
 func (m ChatPanelModel) Init() tea.Cmd {
@@ -250,6 +295,9 @@ func (m ChatPanelModel) Update(msg tea.Msg) (ChatPanelModel, tea.Cmd) {
 			if msg.String() == "ctrl+c" {
 				return m, tea.Quit
 			}
+		case ChatSpinnerTickMsg:
+			m.AdvanceSpinner()
+			return m, nil
 		}
 		return m, nil
 	}
@@ -270,13 +318,17 @@ func (m ChatPanelModel) Update(msg tea.Msg) (ChatPanelModel, tea.Cmd) {
 		case "n":
 			if m.showingDiff {
 				m.RejectDiff()
-				return m, nil
+				return m, func() tea.Msg {
+					return ChatPanelRejectDiffMsg{}
+				}
 			}
 
 		case "esc":
 			if m.showingDiff {
 				m.RejectDiff()
-				return m, nil
+				return m, func() tea.Msg {
+					return ChatPanelRejectDiffMsg{}
+				}
 			}
 			if m.input.Value() == "" {
 				m.Hide()
@@ -428,7 +480,19 @@ func (m ChatPanelModel) View() string {
 	}
 
 	if m.waiting {
-		messagesView.WriteString(DimText.Render("Claude is typing...") + "\n\n")
+		if m.streamingContent != "" {
+			streamStyle := lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#cccccc")).
+				Padding(0, 1)
+			headerLine := DimText.Render("Claude:")
+			messagesView.WriteString(headerLine + "\n")
+			wrapped := wrapText(m.streamingContent, m.width-4)
+			messagesView.WriteString(streamStyle.Render(wrapped) + "\n\n")
+		} else {
+			spinner := chatSpinnerFrames[m.spinnerFrame%len(chatSpinnerFrames)]
+			thinkingStyle := lipgloss.NewStyle().Foreground(ColorAccent)
+			messagesView.WriteString(thinkingStyle.Render(spinner+" Thinking...") + "\n\n")
+		}
 	}
 
 	scrollHint := ""

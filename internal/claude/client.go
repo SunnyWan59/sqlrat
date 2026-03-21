@@ -1,91 +1,176 @@
 package claude
 
 import (
-	"context"
+	"bufio"
+	"bytes"
+	"encoding/json"
 	"fmt"
-
-	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/option"
-)
-
-const (
-	defaultMaxTokens = 4096
+	"net/http"
+	"strings"
 )
 
 type Client struct {
-	client anthropic.Client
+	backendURL string
+	httpClient *http.Client
 }
 
 type Message struct {
-	Role    string
-	Content string
+	Role    string `json:"role"`
+	Content string `json:"content"`
 }
 
-func NewClient(apiKey string) *Client {
+type ChatRequest struct {
+	Messages   []Message `json:"messages"`
+	CurrentSQL string    `json:"current_sql"`
+	Tables     []string  `json:"tables"`
+	LastError  string    `json:"last_error"`
+}
+
+type DiffPayload struct {
+	OldSQL string `json:"old_sql"`
+	NewSQL string `json:"new_sql"`
+}
+
+type DonePayload struct {
+	FullResponse string      `json:"full_response"`
+	Diff         DiffPayload `json:"diff"`
+}
+
+type StreamEvent struct {
+	Type    string // "token", "done", "error"
+	Content string // token text
+	Done    *DonePayload
+	Error   string
+}
+
+func NewClient(backendURL string) *Client {
+	if backendURL == "" {
+		backendURL = "http://localhost:8080"
+	}
 	return &Client{
-		client: anthropic.NewClient(
-			option.WithAPIKey(apiKey),
-		),
+		backendURL: strings.TrimRight(backendURL, "/"),
+		httpClient: &http.Client{},
 	}
 }
 
 func (c *Client) SendMessage(prompt string, systemPrompt string) (string, error) {
-	params := anthropic.MessageNewParams{
-		Model:     anthropic.ModelClaudeSonnet4_20250514,
-		MaxTokens: defaultMaxTokens,
-		Messages: []anthropic.MessageParam{
-			anthropic.NewUserMessage(anthropic.NewTextBlock(prompt)),
-		},
+	req := ChatRequest{
+		Messages: []Message{{Role: "user", Content: prompt}},
 	}
 
-	if systemPrompt != "" {
-		params.System = []anthropic.TextBlockParam{
-			{Text: systemPrompt},
+	events := c.stream(req)
+	var response string
+	for event := range events {
+		switch event.Type {
+		case "done":
+			if event.Done != nil {
+				response = event.Done.FullResponse
+			}
+		case "error":
+			return "", fmt.Errorf("%s", event.Error)
 		}
 	}
-
-	msg, err := c.client.Messages.New(context.Background(), params)
-	if err != nil {
-		return "", fmt.Errorf("send message: %w", err)
-	}
-
-	if len(msg.Content) == 0 {
-		return "", fmt.Errorf("empty response from API")
-	}
-
-	return msg.Content[0].Text, nil
+	return response, nil
 }
 
 func (c *Client) SendConversation(messages []Message, systemPrompt string) (string, error) {
-	msgParams := make([]anthropic.MessageParam, len(messages))
-	for i, msg := range messages {
-		if msg.Role == "user" {
-			msgParams[i] = anthropic.NewUserMessage(anthropic.NewTextBlock(msg.Content))
-		} else {
-			msgParams[i] = anthropic.NewAssistantMessage(anthropic.NewTextBlock(msg.Content))
+	req := ChatRequest{
+		Messages: messages,
+	}
+
+	events := c.stream(req)
+	var response string
+	for event := range events {
+		switch event.Type {
+		case "done":
+			if event.Done != nil {
+				response = event.Done.FullResponse
+			}
+		case "error":
+			return "", fmt.Errorf("%s", event.Error)
 		}
 	}
+	return response, nil
+}
 
-	params := anthropic.MessageNewParams{
-		Model:     anthropic.ModelClaudeSonnet4_20250514,
-		MaxTokens: defaultMaxTokens,
-		Messages:  msgParams,
-	}
+func (c *Client) SendMessageStream(req ChatRequest) <-chan StreamEvent {
+	return c.stream(req)
+}
 
-	if systemPrompt != "" {
-		params.System = []anthropic.TextBlockParam{
-			{Text: systemPrompt},
+func (c *Client) stream(req ChatRequest) <-chan StreamEvent {
+	events := make(chan StreamEvent)
+
+	go func() {
+		defer close(events)
+
+		body, err := json.Marshal(req)
+		if err != nil {
+			events <- StreamEvent{Type: "error", Error: fmt.Sprintf("marshal error: %v", err)}
+			return
 		}
-	}
 
-	msg, err := c.client.Messages.New(context.Background(), params)
-	if err != nil {
-		return "", fmt.Errorf("send conversation: %w", err)
-	}
+		httpReq, err := http.NewRequest("POST", c.backendURL+"/chat", bytes.NewReader(body))
+		if err != nil {
+			events <- StreamEvent{Type: "error", Error: fmt.Sprintf("request error: %v", err)}
+			return
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("Accept", "text/event-stream")
 
-	if len(msg.Content) == 0 {
-		return "", fmt.Errorf("empty response from API")
-	}
+		resp, err := c.httpClient.Do(httpReq)
+		if err != nil {
+			events <- StreamEvent{Type: "error", Error: fmt.Sprintf("connection error: %v", err)}
+			return
+		}
+		defer resp.Body.Close()
 
-	return msg.Content[0].Text, nil
+		if resp.StatusCode != http.StatusOK {
+			events <- StreamEvent{Type: "error", Error: fmt.Sprintf("server error: %s", resp.Status)}
+			return
+		}
+
+		scanner := bufio.NewScanner(resp.Body)
+		var eventType string
+
+		for scanner.Scan() {
+			line := scanner.Text()
+
+			if strings.HasPrefix(line, "event: ") {
+				eventType = strings.TrimPrefix(line, "event: ")
+				continue
+			}
+
+			if strings.HasPrefix(line, "data: ") {
+				data := strings.TrimPrefix(line, "data: ")
+
+				switch eventType {
+				case "token":
+					var payload struct {
+						Content string `json:"content"`
+					}
+					if json.Unmarshal([]byte(data), &payload) == nil {
+						events <- StreamEvent{Type: "token", Content: payload.Content}
+					}
+
+				case "done":
+					var payload DonePayload
+					if json.Unmarshal([]byte(data), &payload) == nil {
+						events <- StreamEvent{Type: "done", Done: &payload}
+					}
+
+				case "error":
+					var payload struct {
+						Error string `json:"error"`
+					}
+					if json.Unmarshal([]byte(data), &payload) == nil {
+						events <- StreamEvent{Type: "error", Error: payload.Error}
+					}
+				}
+
+				eventType = ""
+			}
+		}
+	}()
+
+	return events
 }

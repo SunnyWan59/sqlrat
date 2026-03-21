@@ -50,7 +50,26 @@ type EditorModel struct {
 	visualStartRow  int
 	visualStartCol  int
 	vimMode         VimMode
-	vimPending      string // for multi-key commands like dd, dw, etc.
+	vimPending      string     // for multi-key commands like dd, dw, etc.
+	diffLines       []DiffLine // non-nil when showing a diff preview
+	diffScrollY     int
+}
+
+// ShowDiff displays a diff preview in the editor.
+func (m *EditorModel) ShowDiff(oldSQL, newSQL string) {
+	m.diffLines = ComputeDiff(oldSQL, newSQL)
+	m.diffScrollY = 0
+}
+
+// ClearDiff removes the diff preview and returns to normal editing.
+func (m *EditorModel) ClearDiff() {
+	m.diffLines = nil
+	m.diffScrollY = 0
+}
+
+// HasDiff returns whether the editor is showing a diff preview.
+func (m *EditorModel) HasDiff() bool {
+	return m.diffLines != nil
 }
 
 // SetTableNames updates the list of table names used for autocomplete.
@@ -819,19 +838,25 @@ func (m EditorModel) View() string {
 		innerH = 3
 	}
 
-	modeStr := m.VimModeString()
-	modeStyle := lipgloss.NewStyle().Bold(true)
-	if m.vimMode == VimInsert {
-		modeStyle = modeStyle.Foreground(lipgloss.Color("#00FF00"))
+	var titleLeft, helpText string
+	if m.diffLines != nil {
+		diffStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FF6600"))
+		titleLeft = HeaderStyle.Render("SQL Editor") + " " + diffStyle.Render("-- DIFF PREVIEW --")
+		helpText = "y accept | n reject | ↑/↓ scroll"
 	} else {
-		modeStyle = modeStyle.Foreground(lipgloss.Color("#FFAA00"))
-	}
-	titleLeft := HeaderStyle.Render("SQL Editor") + " " + modeStyle.Render("-- "+modeStr+" --")
-	var helpText string
-	if m.vimMode == VimInsert {
-		helpText = "Esc normal | Tab indent/complete | Ctrl+J run | Ctrl+E all"
-	} else {
-		helpText = "i insert | hjkl move | dd del line | dw del word | w/b word | Ctrl+J run"
+		modeStr := m.VimModeString()
+		modeStyle := lipgloss.NewStyle().Bold(true)
+		if m.vimMode == VimInsert {
+			modeStyle = modeStyle.Foreground(lipgloss.Color("#00FF00"))
+		} else {
+			modeStyle = modeStyle.Foreground(lipgloss.Color("#FFAA00"))
+		}
+		titleLeft = HeaderStyle.Render("SQL Editor") + " " + modeStyle.Render("-- "+modeStr+" --")
+		if m.vimMode == VimInsert {
+			helpText = "Esc normal | Tab indent/complete | Ctrl+J run | Ctrl+E all"
+		} else {
+			helpText = "i insert | hjkl move | dd del line | dw del word | w/b word | Ctrl+J run"
+		}
 	}
 	titleRight := DimText.Render(helpText)
 	gap := innerW - lipgloss.Width(titleLeft) - lipgloss.Width(titleRight)
@@ -840,9 +865,53 @@ func (m EditorModel) View() string {
 	}
 	header := titleLeft + strings.Repeat(" ", gap) + titleRight
 
-	editorContent := m.renderHighlightedText()
+	var editorContent string
+	if m.diffLines != nil {
+		editorContent = m.renderDiffPreview()
+	} else {
+		editorContent = m.renderHighlightedText()
+	}
 	content := header + "\n" + editorContent
 	return borderStyle.Width(innerW).Height(innerH).Render(content)
+}
+
+func (m EditorModel) renderDiffPreview() string {
+	var result strings.Builder
+	lineNumWidth := 4
+	displayLines := m.height - 4
+	if displayLines < 1 {
+		displayLines = 1
+	}
+
+	startLine := m.diffScrollY
+	endLine := startLine + displayLines
+	if endLine > len(m.diffLines) {
+		endLine = len(m.diffLines)
+	}
+
+	for i := startLine; i < endLine; i++ {
+		dl := m.diffLines[i]
+		lineNum := fmt.Sprintf("%*d", lineNumWidth, dl.LineNum)
+		lineNumStyled := DimText.Render(lineNum)
+
+		switch dl.Type {
+		case DiffAdded:
+			line := DiffAddedStyle.Render("+ " + dl.NewText)
+			result.WriteString(lineNumStyled + "  " + line)
+		case DiffDeleted:
+			line := DiffDeletedStyle.Render("- " + dl.OldText)
+			result.WriteString(lineNumStyled + "  " + line)
+		case DiffUnchanged:
+			line := DiffNormalStyle.Render("  " + dl.OldText)
+			result.WriteString(lineNumStyled + "  " + line)
+		}
+
+		if i < endLine-1 {
+			result.WriteString("\n")
+		}
+	}
+
+	return result.String()
 }
 
 func (m EditorModel) renderHighlightedText() string {
