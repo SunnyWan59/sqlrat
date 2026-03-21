@@ -153,6 +153,34 @@ func (d *DB) GetPrimaryKeys(tableName string) ([]string, error) {
 	return pks, rows.Err()
 }
 
+// ListAllColumnNames returns a map of table name → column names for all public tables.
+// This fetches everything in a single query so it can be used as a schema cache.
+func (d *DB) ListAllColumnNames() (map[string][]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	rows, err := d.Conn.Query(ctx, `
+		SELECT table_name, column_name
+		FROM information_schema.columns
+		WHERE table_schema = 'public'
+		ORDER BY table_name, ordinal_position
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make(map[string][]string)
+	for rows.Next() {
+		var table, col string
+		if err := rows.Scan(&table, &col); err != nil {
+			return nil, err
+		}
+		result[table] = append(result[table], col)
+	}
+	return result, rows.Err()
+}
+
 // GetColumns returns column metadata for a table.
 func (d *DB) GetColumns(tableName string) ([]ColumnInfo, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

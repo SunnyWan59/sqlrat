@@ -152,6 +152,9 @@ func NewModel(database *db.DB, tables []string, databases []string) Model {
 
 	editorModel := ui.NewEditorModel()
 	editorModel.SetTableNames(tables)
+	if colCache, err := database.ListAllColumnNames(); err == nil {
+		editorModel.SetColumnCache(colCache)
+	}
 
 	autosaved, _ := config.LoadAutosave()
 	if autosaved != "" {
@@ -286,7 +289,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.activePane == SidebarPane && m.sidebar.IsSearching() {
 				break
 			}
-			if m.activePane == EditorPane && m.editor.HasGhost() {
+			if m.activePane == EditorPane && m.editor.IsInsertMode() {
 				break
 			}
 			m.cycleFocus(true)
@@ -349,6 +352,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.editor.SetTableNames(msg.tables)
 				m.editor.SetColumnNames(nil)
 				m.lastColumnRefreshTbl = ""
+				m.refreshSchemaCache()
 				m.changes.Clear()
 				m.lastTable = ""
 				m.results.Clear()
@@ -396,6 +400,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.results.Clear()
 			m.editor.SetColumnNames(nil)
 			m.lastColumnRefreshTbl = ""
+			m.refreshSchemaCache()
 			m.statusbar.SetMessage(fmt.Sprintf("Switched to %s (%d tables)", msg.dbName, len(msg.tables)), ui.MsgSuccess)
 		}
 		return m, nil
@@ -456,6 +461,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.sidebar.SetTables(msg.tables)
 			m.editor.SetTableNames(msg.tables)
+			m.refreshSchemaCache()
 			if msg.tableData != nil && msg.tableData.err == nil {
 				m.lastTable = msg.tableName
 				m.results.SetData(msg.tableData.result.Columns, msg.tableData.result.ColumnTypes, msg.tableData.result.Rows)
@@ -527,6 +533,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.sidebar.SetTables(msg.tables)
 			m.editor.SetTableNames(msg.tables)
+			m.refreshSchemaCache()
 			m.changes.Clear()
 			m.statusbar.SetMessage(fmt.Sprintf("Reconnected (%d tables)", len(msg.tables)), ui.MsgSuccess)
 			// Reload active table if one was selected
@@ -1051,6 +1058,14 @@ func extractDDLTableName(sql string) string {
 	return ""
 }
 
+// refreshSchemaCache reloads the column cache from the DB.
+// Called after DDL or database switches so the in-memory cache stays fresh.
+func (m *Model) refreshSchemaCache() {
+	if colCache, err := m.db.ListAllColumnNames(); err == nil {
+		m.editor.SetColumnCache(colCache)
+	}
+}
+
 func (m *Model) refreshEditorColumns() {
 	stmt := m.editor.GetStatementAtCursor()
 	if stmt == "" {
@@ -1065,6 +1080,14 @@ func (m *Model) refreshEditorColumns() {
 		return
 	}
 	m.lastColumnRefreshTbl = tableLower
+
+	// Use the in-memory schema cache first — no DB query needed.
+	if names := m.editor.LookupColumns(tableLower); names != nil {
+		m.editor.SetColumnNames(names)
+		return
+	}
+
+	// Fallback: query DB if table wasn't in cache (e.g. newly created table).
 	cols, err := m.db.GetColumns(tableLower)
 	if err != nil {
 		m.lastColumnRefreshTbl = ""

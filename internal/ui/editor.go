@@ -24,6 +24,14 @@ type ghostCandidate struct {
 	partial int
 }
 
+// VimMode represents the current vim editing mode.
+type VimMode int
+
+const (
+	VimNormal VimMode = iota
+	VimInsert
+)
+
 // EditorModel wraps a textarea for SQL editing.
 type EditorModel struct {
 	textarea        textarea.Model
@@ -37,9 +45,12 @@ type EditorModel struct {
 	ghostIndex      int
 	tableNames      []string
 	columnNames     []string
+	columnCache     map[string][]string // table → columns, loaded once
 	visualMode      bool
 	visualStartRow  int
 	visualStartCol  int
+	vimMode         VimMode
+	vimPending      string // for multi-key commands like dd, dw, etc.
 }
 
 // SetTableNames updates the list of table names used for autocomplete.
@@ -52,10 +63,24 @@ func (m *EditorModel) SetColumnNames(names []string) {
 	m.columnNames = names
 }
 
+// SetColumnCache sets the full schema cache (table → column names).
+// When set, the editor can resolve column names locally without DB queries.
+func (m *EditorModel) SetColumnCache(cache map[string][]string) {
+	m.columnCache = cache
+}
+
+// LookupColumns returns cached column names for the given table, or nil if not cached.
+func (m *EditorModel) LookupColumns(table string) []string {
+	if m.columnCache == nil {
+		return nil
+	}
+	return m.columnCache[strings.ToLower(table)]
+}
+
 // NewEditorModel creates a new SQL editor.
 func NewEditorModel() EditorModel {
 	ta := textarea.New()
-	ta.Placeholder = "Write SQL here... (Ctrl+J run statement, Ctrl+E run all)"
+	ta.Placeholder = "Press i to enter INSERT mode... (Ctrl+J run, Ctrl+E run all)"
 	ta.ShowLineNumbers = true
 	ta.CharLimit = 0
 	ta.Prompt = "  "
@@ -80,6 +105,21 @@ func (m *EditorModel) SetFocused(f bool) {
 // Focused returns the focus state.
 func (m EditorModel) Focused() bool {
 	return m.focused
+}
+
+// IsInsertMode returns whether the editor is in vim insert mode.
+func (m EditorModel) IsInsertMode() bool {
+	return m.vimMode == VimInsert
+}
+
+// VimModeString returns a display string for the current vim mode.
+func (m EditorModel) VimModeString() string {
+	switch m.vimMode {
+	case VimInsert:
+		return "INSERT"
+	default:
+		return "NORMAL"
+	}
 }
 
 // HasGhost returns whether a ghost completion is active.
@@ -117,28 +157,14 @@ func (m EditorModel) Update(msg tea.Msg) (EditorModel, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		if msg.Type == tea.KeyRunes && len(msg.Runes) > 0 && m.visualMode {
-			m.visualMode = false
-		}
+		// Ctrl shortcuts work in both modes
 		switch msg.String() {
-		case "shift+up", "shift+down", "shift+left", "shift+right", "shift+home", "shift+end":
-			m.handleShiftArrow(msg)
-			movementKey := shiftToMovementKey(msg)
-			var cmd tea.Cmd
-			m.textarea, cmd = m.textarea.Update(movementKey)
-			m.updateGhost()
-			return m, cmd
 		case "ctrl+c":
 			if m.visualMode {
 				m.copySelection()
 				m.visualMode = false
 			}
 			return m, nil
-		case "esc":
-			if m.visualMode {
-				m.visualMode = false
-				return m, nil
-			}
 		case "ctrl+y":
 			text := m.textarea.Value()
 			clipboard.WriteAll(text)
@@ -154,9 +180,6 @@ func (m EditorModel) Update(msg tea.Msg) (EditorModel, tea.Cmd) {
 			if sql == "" {
 				return m, nil
 			}
-			formatted := FormatSQL(sql)
-			m.textarea.Reset()
-			m.textarea.InsertString(formatted)
 			m.clearGhost()
 			return m, func() tea.Msg {
 				return ExecuteQueryMsg{SQL: sql}
@@ -173,44 +196,326 @@ func (m EditorModel) Update(msg tea.Msg) (EditorModel, tea.Cmd) {
 			return m, func() tea.Msg {
 				return ExecuteQueryMsg{SQL: sql}
 			}
-		case "tab":
-			if m.ghost != "" {
-				for i := 0; i < m.ghostPartialLen; i++ {
-					m.textarea, _ = m.textarea.Update(tea.KeyMsg{Type: tea.KeyBackspace})
-				}
-				m.textarea.InsertString(m.ghostFull)
-				m.clearGhost()
-				m.updateGhost()
-				return m, nil
-			}
-			m.textarea.InsertString("  ")
-			m.updateGhost()
-			return m, nil
-		case "up":
-			if len(m.ghostMatches) > 1 {
-				m.ghostIndex--
-				if m.ghostIndex < 0 {
-					m.ghostIndex = len(m.ghostMatches) - 1
-				}
-				m.applyGhostIndex()
-				return m, nil
-			}
-		case "down":
-			if len(m.ghostMatches) > 1 {
-				m.ghostIndex++
-				if m.ghostIndex >= len(m.ghostMatches) {
-					m.ghostIndex = 0
-				}
-				m.applyGhostIndex()
-				return m, nil
-			}
 		}
+
+		if m.vimMode == VimNormal {
+			return m.updateNormalMode(msg)
+		}
+		return m.updateInsertMode(msg)
 	}
 
 	var cmd tea.Cmd
 	m.textarea, cmd = m.textarea.Update(msg)
 	m.updateGhost()
 	return m, cmd
+}
+
+// updateInsertMode handles key events in vim insert mode.
+func (m EditorModel) updateInsertMode(msg tea.KeyMsg) (EditorModel, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.vimMode = VimNormal
+		m.visualMode = false
+		m.clearGhost()
+		// Move cursor left one (vim behavior on leaving insert)
+		m.textarea, _ = m.textarea.Update(tea.KeyMsg{Type: tea.KeyLeft})
+		return m, nil
+	case "shift+up", "shift+down", "shift+left", "shift+right", "shift+home", "shift+end":
+		m.handleShiftArrow(msg)
+		movementKey := shiftToMovementKey(msg)
+		var cmd tea.Cmd
+		m.textarea, cmd = m.textarea.Update(movementKey)
+		m.updateGhost()
+		return m, cmd
+	case "tab":
+		if m.ghost != "" {
+			for i := 0; i < m.ghostPartialLen; i++ {
+				m.textarea, _ = m.textarea.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+			}
+			m.textarea.InsertString(m.ghostFull)
+			m.clearGhost()
+			m.updateGhost()
+			return m, nil
+		}
+		m.textarea.InsertString("  ")
+		m.updateGhost()
+		return m, nil
+	case "up":
+		if len(m.ghostMatches) > 1 {
+			m.ghostIndex--
+			if m.ghostIndex < 0 {
+				m.ghostIndex = len(m.ghostMatches) - 1
+			}
+			m.applyGhostIndex()
+			return m, nil
+		}
+	case "down":
+		if len(m.ghostMatches) > 1 {
+			m.ghostIndex++
+			if m.ghostIndex >= len(m.ghostMatches) {
+				m.ghostIndex = 0
+			}
+			m.applyGhostIndex()
+			return m, nil
+		}
+	}
+
+	if msg.Type == tea.KeyRunes && len(msg.Runes) > 0 && m.visualMode {
+		m.visualMode = false
+	}
+
+	var cmd tea.Cmd
+	m.textarea, cmd = m.textarea.Update(msg)
+	m.updateGhost()
+	return m, cmd
+}
+
+// updateNormalMode handles key events in vim normal mode.
+func (m EditorModel) updateNormalMode(msg tea.KeyMsg) (EditorModel, tea.Cmd) {
+	key := msg.String()
+
+	// Handle pending multi-key commands (dd, dw, etc.)
+	if m.vimPending != "" {
+		return m.handlePendingVimCmd(key)
+	}
+
+	switch key {
+	// Enter insert mode
+	case "i":
+		m.vimMode = VimInsert
+		m.textarea.Focus()
+		return m, nil
+	case "a":
+		m.vimMode = VimInsert
+		m.textarea.Focus()
+		m.textarea, _ = m.textarea.Update(tea.KeyMsg{Type: tea.KeyRight})
+		return m, nil
+	case "I":
+		m.vimMode = VimInsert
+		m.textarea.Focus()
+		m.textarea, _ = m.textarea.Update(tea.KeyMsg{Type: tea.KeyHome})
+		return m, nil
+	case "A":
+		m.vimMode = VimInsert
+		m.textarea.Focus()
+		m.textarea, _ = m.textarea.Update(tea.KeyMsg{Type: tea.KeyEnd})
+		return m, nil
+	case "o":
+		m.vimMode = VimInsert
+		m.textarea.Focus()
+		m.textarea, _ = m.textarea.Update(tea.KeyMsg{Type: tea.KeyEnd})
+		m.textarea.InsertString("\n")
+		return m, nil
+	case "O":
+		m.vimMode = VimInsert
+		m.textarea.Focus()
+		m.textarea, _ = m.textarea.Update(tea.KeyMsg{Type: tea.KeyHome})
+		m.textarea.InsertString("\n")
+		m.textarea, _ = m.textarea.Update(tea.KeyMsg{Type: tea.KeyUp})
+		return m, nil
+
+	// Movement
+	case "h", "left":
+		m.textarea, _ = m.textarea.Update(tea.KeyMsg{Type: tea.KeyLeft})
+		return m, nil
+	case "l", "right":
+		m.textarea, _ = m.textarea.Update(tea.KeyMsg{Type: tea.KeyRight})
+		return m, nil
+	case "j", "down":
+		m.textarea, _ = m.textarea.Update(tea.KeyMsg{Type: tea.KeyDown})
+		return m, nil
+	case "k", "up":
+		m.textarea, _ = m.textarea.Update(tea.KeyMsg{Type: tea.KeyUp})
+		return m, nil
+	case "0":
+		m.textarea, _ = m.textarea.Update(tea.KeyMsg{Type: tea.KeyHome})
+		return m, nil
+	case "$":
+		m.textarea, _ = m.textarea.Update(tea.KeyMsg{Type: tea.KeyEnd})
+		return m, nil
+	case "w":
+		m.vimWordForward()
+		return m, nil
+	case "b":
+		m.vimWordBackward()
+		return m, nil
+	case "g":
+		// gg - go to top
+		m.vimPending = "g"
+		return m, nil
+	case "G":
+		// G - go to bottom
+		lines := strings.Split(m.textarea.Value(), "\n")
+		for i := 0; i < len(lines); i++ {
+			m.textarea, _ = m.textarea.Update(tea.KeyMsg{Type: tea.KeyDown})
+		}
+		m.textarea, _ = m.textarea.Update(tea.KeyMsg{Type: tea.KeyHome})
+		return m, nil
+
+	// Editing in normal mode
+	case "x":
+		// Delete char under cursor
+		m.textarea, _ = m.textarea.Update(tea.KeyMsg{Type: tea.KeyDelete})
+		return m, nil
+	case "d":
+		m.vimPending = "d"
+		return m, nil
+	case "p":
+		if clipText, err := clipboard.ReadAll(); err == nil && clipText != "" {
+			m.textarea.InsertString(clipText)
+		}
+		return m, nil
+
+	case "u":
+		m.textarea, _ = m.textarea.Update(tea.KeyMsg{Type: tea.KeyCtrlZ})
+		return m, nil
+
+	case "esc":
+		m.visualMode = false
+		m.vimPending = ""
+		return m, nil
+	}
+
+	return m, nil
+}
+
+// handlePendingVimCmd handles the second key of multi-key vim commands.
+func (m EditorModel) handlePendingVimCmd(key string) (EditorModel, tea.Cmd) {
+	pending := m.vimPending
+	m.vimPending = ""
+
+	switch pending {
+	case "d":
+		switch key {
+		case "d":
+			// dd - delete current line
+			m.textarea, _ = m.textarea.Update(tea.KeyMsg{Type: tea.KeyHome})
+			line := m.currentLine()
+			// Select entire line content and delete it
+			for i := 0; i < len([]rune(line)); i++ {
+				m.textarea, _ = m.textarea.Update(tea.KeyMsg{Type: tea.KeyDelete})
+			}
+			// Delete the newline too if possible
+			m.textarea, _ = m.textarea.Update(tea.KeyMsg{Type: tea.KeyDelete})
+			return m, nil
+		case "w":
+			// dw - delete word
+			m.vimDeleteWord()
+			return m, nil
+		}
+	case "g":
+		switch key {
+		case "g":
+			// gg - go to top
+			for i := 0; i < 10000; i++ {
+				line := m.textarea.Line()
+				m.textarea, _ = m.textarea.Update(tea.KeyMsg{Type: tea.KeyUp})
+				if m.textarea.Line() == line {
+					break
+				}
+			}
+			m.textarea, _ = m.textarea.Update(tea.KeyMsg{Type: tea.KeyHome})
+			return m, nil
+		}
+	}
+
+	return m, nil
+}
+
+// currentLine returns the text of the current cursor line.
+func (m EditorModel) currentLine() string {
+	lines := strings.Split(m.textarea.Value(), "\n")
+	cur := m.textarea.Line()
+	if cur < len(lines) {
+		return lines[cur]
+	}
+	return ""
+}
+
+// vimWordForward moves the cursor forward one word.
+func (m *EditorModel) vimWordForward() {
+	text := m.textarea.Value()
+	lines := strings.Split(text, "\n")
+	curLine := m.textarea.Line()
+	col := m.textarea.LineInfo().ColumnOffset
+
+	if curLine >= len(lines) {
+		return
+	}
+	line := []rune(lines[curLine])
+
+	// Skip current word chars
+	for col < len(line) && !unicode.IsSpace(line[col]) {
+		m.textarea, _ = m.textarea.Update(tea.KeyMsg{Type: tea.KeyRight})
+		col++
+	}
+	// Skip whitespace
+	for col < len(line) && unicode.IsSpace(line[col]) {
+		m.textarea, _ = m.textarea.Update(tea.KeyMsg{Type: tea.KeyRight})
+		col++
+	}
+	// If at end of line, move to next line
+	if col >= len(line) && curLine < len(lines)-1 {
+		m.textarea, _ = m.textarea.Update(tea.KeyMsg{Type: tea.KeyDown})
+		m.textarea, _ = m.textarea.Update(tea.KeyMsg{Type: tea.KeyHome})
+	}
+}
+
+// vimWordBackward moves the cursor backward one word.
+func (m *EditorModel) vimWordBackward() {
+	col := m.textarea.LineInfo().ColumnOffset
+
+	if col == 0 {
+		m.textarea, _ = m.textarea.Update(tea.KeyMsg{Type: tea.KeyUp})
+		m.textarea, _ = m.textarea.Update(tea.KeyMsg{Type: tea.KeyEnd})
+		return
+	}
+
+	text := m.textarea.Value()
+	lines := strings.Split(text, "\n")
+	curLine := m.textarea.Line()
+	if curLine >= len(lines) {
+		return
+	}
+	line := []rune(lines[curLine])
+
+	// Skip whitespace backward
+	for col > 0 && col <= len(line) && unicode.IsSpace(line[col-1]) {
+		m.textarea, _ = m.textarea.Update(tea.KeyMsg{Type: tea.KeyLeft})
+		col--
+	}
+	// Skip word chars backward
+	for col > 0 && col <= len(line) && !unicode.IsSpace(line[col-1]) {
+		m.textarea, _ = m.textarea.Update(tea.KeyMsg{Type: tea.KeyLeft})
+		col--
+	}
+}
+
+// vimDeleteWord deletes from cursor to start of next word.
+func (m *EditorModel) vimDeleteWord() {
+	text := m.textarea.Value()
+	lines := strings.Split(text, "\n")
+	curLine := m.textarea.Line()
+	col := m.textarea.LineInfo().ColumnOffset
+
+	if curLine >= len(lines) {
+		return
+	}
+	line := []rune(lines[curLine])
+	startCol := col
+
+	// Count chars to delete (word + trailing space)
+	for col < len(line) && !unicode.IsSpace(line[col]) {
+		col++
+	}
+	for col < len(line) && unicode.IsSpace(line[col]) {
+		col++
+	}
+
+	count := col - startCol
+	for i := 0; i < count; i++ {
+		m.textarea, _ = m.textarea.Update(tea.KeyMsg{Type: tea.KeyDelete})
+	}
 }
 
 // Value returns the current editor text.
@@ -514,8 +819,21 @@ func (m EditorModel) View() string {
 		innerH = 3
 	}
 
-	titleLeft := HeaderStyle.Render("SQL Editor")
-	titleRight := DimText.Render("Shift+Arrows select | Ctrl+C copy sel | Ctrl+Y all | Ctrl+V paste | Ctrl+J run | Ctrl+E all")
+	modeStr := m.VimModeString()
+	modeStyle := lipgloss.NewStyle().Bold(true)
+	if m.vimMode == VimInsert {
+		modeStyle = modeStyle.Foreground(lipgloss.Color("#00FF00"))
+	} else {
+		modeStyle = modeStyle.Foreground(lipgloss.Color("#FFAA00"))
+	}
+	titleLeft := HeaderStyle.Render("SQL Editor") + " " + modeStyle.Render("-- "+modeStr+" --")
+	var helpText string
+	if m.vimMode == VimInsert {
+		helpText = "Esc normal | Tab indent/complete | Ctrl+J run | Ctrl+E all"
+	} else {
+		helpText = "i insert | hjkl move | dd del line | dw del word | w/b word | Ctrl+J run"
+	}
+	titleRight := DimText.Render(helpText)
 	gap := innerW - lipgloss.Width(titleLeft) - lipgloss.Width(titleRight)
 	if gap < 1 {
 		gap = 1
